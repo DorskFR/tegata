@@ -11,10 +11,12 @@ use crate::auth::Auth;
 use crate::bundle;
 use crate::ca::Ca;
 use crate::db::Db;
-use crate::enroll::{Enrollments, Pending};
+use crate::enroll::{encode_p12, p12_bytes, token_hash};
 use crate::error::{ApiError, ApiResult};
 use crate::kube::ConfigMapWriter;
-use crate::model::{AppRule, CertRecord, CertState, Device, DeviceView, Seen, State};
+use crate::model::{
+    AppRule, CertRecord, CertState, Device, DeviceView, EnrollmentRecord, Seen, State,
+};
 use crate::rules::{clean_groups, normalize_host};
 use crate::util::{now, password, random_token};
 
@@ -48,7 +50,6 @@ pub struct App {
     pub settings: Settings,
     pub db: Db,
     pub ca: Arc<dyn Ca>,
-    pub enrollments: Enrollments,
     pub auth: Auth,
     pub trust: Option<ConfigMapWriter>,
     seen: Mutex<HashMap<String, Seen>>,
@@ -119,7 +120,6 @@ impl App {
             settings,
             db,
             ca,
-            enrollments: Enrollments::default(),
             auth,
             trust,
             seen: Mutex::new(HashMap::new()),
@@ -164,7 +164,7 @@ impl App {
         device_id: Uuid,
         name: &str,
         validity: Duration,
-    ) -> ApiResult<(CertRecord, Enrollment)> {
+    ) -> ApiResult<(CertRecord, EnrollmentRecord, Enrollment)> {
         let latest = self.ca.not_after() - Duration::minutes(5) - now();
         let issued = self.ca.issue(name, validity.min(latest)).await?;
         let password = password();
@@ -182,25 +182,21 @@ impl App {
             revoked_at: None,
             superseded: false,
         };
-        self.enrollments
-            .insert(
-                &token,
-                Pending {
-                    device_id,
-                    device_name: name.to_owned(),
-                    serial: issued.serial,
-                    p12,
-                    mobileconfig,
-                    expires_at,
-                },
-            )
-            .await;
+        let link = EnrollmentRecord {
+            token_hash: token_hash(&token),
+            device_id,
+            device_name: name.to_owned(),
+            serial: issued.serial,
+            p12_base64: encode_p12(&p12),
+            mobileconfig,
+            expires_at,
+        };
         let url = self
             .settings
             .public_url
             .join(&format!("enroll/{token}"))
             .map_err(|e| ApiError::Internal(e.into()))?;
-        Ok((record, Enrollment { url: url.to_string(), password, expires_at }))
+        Ok((record, link, Enrollment { url: url.to_string(), password, expires_at }))
     }
 
     pub async fn create_device(
@@ -219,11 +215,12 @@ impl App {
             return Err(ApiError::Conflict(format!("a device named {name} already exists")));
         }
         let id = Uuid::new_v4();
-        let (record, enrollment) = self.issue_pending(id, &name, validity).await?;
+        let (record, link, enrollment) = self.issue_pending(id, &name, validity).await?;
         let serial = record.serial.clone();
         let result = self
             .db
             .update(|s| {
+                s.prune(now());
                 if taken(s) {
                     return Err(ApiError::Conflict(format!(
                         "a device named {name} already exists"
@@ -240,6 +237,7 @@ impl App {
                 };
                 let view = self.view(&device);
                 s.devices.push(device);
+                s.enrollments.push(link.clone());
                 Ok(view)
             })
             .await;
@@ -249,7 +247,6 @@ impl App {
                 Ok(Created { device, enrollment })
             }
             Err(err) => {
-                self.enrollments.forget_device(id).await;
                 self.ca.revoke(&serial).await?;
                 Err(err)
             }
@@ -278,13 +275,16 @@ impl App {
     }
 
     async fn replace_pending(&self, device: &Device, validity: Duration) -> ApiResult<Created> {
-        let (record, enrollment) = self.issue_pending(device.id, &device.name, validity).await?;
-        self.enrollments.forget_device_except(device.id, &record.serial).await;
+        let (record, link, enrollment) =
+            self.issue_pending(device.id, &device.name, validity).await?;
         let mut stale = Vec::new();
         let view = self
             .db
             .update(|s| {
                 stale.clear();
+                s.prune(now());
+                s.enrollments.retain(|e| e.device_id != device.id);
+                s.enrollments.push(link.clone());
                 let d =
                     s.devices.iter_mut().find(|d| d.id == device.id).ok_or(ApiError::NotFound)?;
                 let t = now();
@@ -301,12 +301,12 @@ impl App {
     }
 
     pub async fn revoke_device(&self, id: Uuid) -> ApiResult<DeviceView> {
-        self.enrollments.forget_device(id).await;
         let mut serials = Vec::new();
         let view = self
             .db
             .update(|s| {
                 serials.clear();
+                s.enrollments.retain(|e| e.device_id != id);
                 let d = s.devices.iter_mut().find(|d| d.id == id).ok_or(ApiError::NotFound)?;
                 let t = now();
                 for cert in d.certs.iter_mut().filter(|c| c.is_live(t)) {
@@ -347,55 +347,63 @@ impl App {
         Ok(())
     }
 
-    pub async fn enrollment_info(&self, token: &str) -> Option<(String, OffsetDateTime)> {
-        self.enrollments.peek(token, now()).await
-    }
-
     /// Hands out the bundle once, marks the cert installed and retires the one it replaces.
+    /// Taking the link is one check-and-set write, so only one replica can serve it.
     pub async fn download(&self, token: &str, kind: &Download) -> ApiResult<(Vec<u8>, String)> {
-        let pending = self.enrollments.take(token, now()).await.ok_or(ApiError::NotFound)?;
+        let hash = token_hash(token);
+        if let Err(err) = self.db.refresh().await {
+            tracing::warn!(error = ?err, "refreshing state failed");
+        }
         let mut superseded = Vec::new();
-        self.db
+        let link = self
+            .db
             .update(|s| {
                 superseded.clear();
+                let t = now();
+                s.prune(t);
+                let at = s
+                    .enrollments
+                    .iter()
+                    .position(|e| e.token_hash == hash)
+                    .ok_or(ApiError::NotFound)?;
+                let link = s.enrollments.remove(at);
                 let d = s
                     .devices
                     .iter_mut()
-                    .find(|d| d.id == pending.device_id)
+                    .find(|d| d.id == link.device_id)
                     .ok_or(ApiError::NotFound)?;
-                let t = now();
-                let cert = d.cert_mut(&pending.serial).ok_or(ApiError::NotFound)?;
+                let cert = d.cert_mut(&link.serial).ok_or(ApiError::NotFound)?;
                 if cert.state(t) != CertState::Pending {
                     return Err(ApiError::NotFound);
                 }
                 cert.enrolled_at = Some(t);
-                for old in d.certs.iter_mut().filter(|c| c.serial != pending.serial) {
+                for old in d.certs.iter_mut().filter(|c| c.serial != link.serial) {
                     if old.state(t) == CertState::Active {
                         old.revoked_at = Some(t);
                         old.superseded = true;
                         superseded.push(old.serial.clone());
                     }
                 }
-                Ok::<_, ApiError>(())
+                Ok::<_, ApiError>(link)
             })
             .await?;
-        tracing::info!(device = %pending.device_name, serial = %pending.serial, "certificate downloaded");
+        tracing::info!(device = %link.device_name, serial = %link.serial, "certificate downloaded");
         self.revoke_serials(&superseded).await?;
         Ok(match kind {
-            Download::Profile => (pending.mobileconfig.into_bytes(), pending.device_name),
-            Download::Pkcs12 => (pending.p12, pending.device_name),
+            Download::Profile => (link.mobileconfig.into_bytes(), link.device_name),
+            Download::Pkcs12 => (p12_bytes(&link)?, link.device_name),
         })
     }
 
     /// Revokes certs whose install link expired or was lost in a restart.
     pub async fn sweep(&self) -> anyhow::Result<()> {
         let t = now();
-        self.enrollments.drop_expired(t).await;
-        let live: Vec<String> = self.enrollments.serials().await;
         let mut orphans = Vec::new();
         self.db
             .update(|s| {
                 orphans.clear();
+                s.prune(t);
+                let live: Vec<String> = s.enrollments.iter().map(|e| e.serial.clone()).collect();
                 for cert in s.devices.iter_mut().flat_map(|d| d.certs.iter_mut()) {
                     if cert.state(t) == CertState::Pending && !live.contains(&cert.serial) {
                         cert.revoked_at = Some(t);

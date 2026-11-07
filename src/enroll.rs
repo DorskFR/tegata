@@ -1,57 +1,42 @@
-use std::collections::HashMap;
-
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use time::OffsetDateTime;
-use tokio::sync::Mutex;
-use uuid::Uuid;
 
-use crate::util::sha256_hex;
+use crate::app::App;
+use crate::model::EnrollmentRecord;
+use crate::util::{now, sha256_hex};
 
-pub struct Pending {
-    pub device_id: Uuid,
-    pub device_name: String,
-    pub serial: String,
-    pub p12: Vec<u8>,
-    pub mobileconfig: String,
-    pub expires_at: OffsetDateTime,
+pub fn token_hash(token: &str) -> String {
+    sha256_hex(token.as_bytes())
 }
 
-/// One-shot download links, kept in memory only: a restart voids them and the sweeper
-/// revokes their certificates.
-#[derive(Default)]
-pub struct Enrollments {
-    by_token: Mutex<HashMap<String, Pending>>,
+pub fn p12_bytes(record: &EnrollmentRecord) -> anyhow::Result<Vec<u8>> {
+    Ok(STANDARD.decode(&record.p12_base64)?)
 }
 
-impl Enrollments {
-    pub async fn insert(&self, token: &str, pending: Pending) {
-        self.by_token.lock().await.insert(sha256_hex(token.as_bytes()), pending);
-    }
+pub fn encode_p12(p12: &[u8]) -> String {
+    STANDARD.encode(p12)
+}
 
-    pub async fn peek(&self, token: &str, now: OffsetDateTime) -> Option<(String, OffsetDateTime)> {
-        let map = self.by_token.lock().await;
-        map.get(&sha256_hex(token.as_bytes()))
-            .filter(|p| p.expires_at > now)
-            .map(|p| (p.device_name.clone(), p.expires_at))
-    }
-
-    pub async fn take(&self, token: &str, now: OffsetDateTime) -> Option<Pending> {
-        let mut map = self.by_token.lock().await;
-        map.remove(&sha256_hex(token.as_bytes())).filter(|p| p.expires_at > now)
-    }
-
-    pub async fn forget_device(&self, device_id: Uuid) {
-        self.by_token.lock().await.retain(|_, p| p.device_id != device_id);
-    }
-
-    pub async fn forget_device_except(&self, device_id: Uuid, serial: &str) {
-        self.by_token.lock().await.retain(|_, p| p.device_id != device_id || p.serial == serial);
-    }
-
-    pub async fn drop_expired(&self, now: OffsetDateTime) {
-        self.by_token.lock().await.retain(|_, p| p.expires_at > now);
-    }
-
-    pub async fn serials(&self) -> Vec<String> {
-        self.by_token.lock().await.values().map(|p| p.serial.clone()).collect()
+impl App {
+    /// Device name and expiry of a still usable link; checks the store again on a miss
+    /// in case another replica created it.
+    pub async fn enrollment_info(&self, token: &str) -> Option<(String, OffsetDateTime)> {
+        let hash = token_hash(token);
+        let find = |state: &crate::model::State| {
+            let t = now();
+            state
+                .enrollments
+                .iter()
+                .find(|e| e.token_hash == hash && e.expires_at > t)
+                .map(|e| (e.device_name.clone(), e.expires_at))
+        };
+        if let Some(found) = find(&self.db.read().await) {
+            return Some(found);
+        }
+        if let Err(err) = self.db.refresh().await {
+            tracing::warn!(error = ?err, "refreshing state failed");
+        }
+        find(&self.db.read().await)
     }
 }

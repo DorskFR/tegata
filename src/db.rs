@@ -22,6 +22,20 @@ impl Db {
         self.cache.lock().await.0.clone()
     }
 
+    /// Picks up writes made by other replicas. Never moves the cache backwards.
+    pub async fn refresh(&self) -> anyhow::Result<()> {
+        let loaded = self.store.load().await?;
+        let mut cache = self.cache.lock().await;
+        let newer = match (loaded.1, cache.1) {
+            (Some(new), Some(old)) => new > old,
+            _ => true,
+        };
+        if newer {
+            *cache = loaded;
+        }
+        Ok(())
+    }
+
     /// Applies `f` to a copy of the state and persists it. `f` may run again after a
     /// concurrent write elsewhere, so it must only depend on the state it is given.
     pub async fn update<T, E>(&self, mut f: impl FnMut(&mut State) -> Result<T, E>) -> Result<T, E>

@@ -11,6 +11,57 @@ pub struct State {
     pub passkeys: Vec<PasskeyRecord>,
     #[serde(default)]
     pub apps: Vec<AppRule>,
+    #[serde(default)]
+    pub sessions: Vec<SessionRecord>,
+    #[serde(default)]
+    pub ceremonies: Vec<CeremonyRecord>,
+    #[serde(default)]
+    pub enrollments: Vec<EnrollmentRecord>,
+}
+
+impl State {
+    pub fn prune(&mut self, now: OffsetDateTime) {
+        self.sessions.retain(|s| s.expires_at > now);
+        self.ceremonies.retain(|c| c.expires_at > now);
+        self.enrollments.retain(|e| e.expires_at > now);
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SessionRecord {
+    pub token_hash: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub expires_at: OffsetDateTime,
+}
+
+/// A passkey ceremony between its start and finish requests, which may reach different
+/// replicas. The state never leaves the server.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CeremonyRecord {
+    pub id_hash: String,
+    pub registration: Option<RegistrationIntent>,
+    pub state: serde_json::Value,
+    #[serde(with = "time::serde::rfc3339")]
+    pub expires_at: OffsetDateTime,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RegistrationIntent {
+    pub name: String,
+    pub first: bool,
+}
+
+/// A one-shot install link. The bundles are encrypted with a password that is not stored.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EnrollmentRecord {
+    pub token_hash: String,
+    pub device_id: Uuid,
+    pub device_name: String,
+    pub serial: String,
+    pub p12_base64: String,
+    pub mobileconfig: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub expires_at: OffsetDateTime,
 }
 
 /// A hostname behind the gateway. Open to every valid device unless `restricted`, in
