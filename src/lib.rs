@@ -63,9 +63,8 @@ pub fn router(app: AppState) -> Router {
 /// The Envoy ext_authz endpoint, served on its own port so it is never exposed publicly.
 pub fn authz_router(app: AppState) -> Router {
     Router::new()
-        .route("/authz", any(authz::check))
-        .route("/authz/{*rest}", any(authz::check))
         .route("/healthz", get(|| async { "ok" }))
+        .fallback(any(authz::check))
         .with_state(app)
 }
 

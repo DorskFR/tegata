@@ -1,4 +1,5 @@
 use std::future::IntoFuture;
+use std::io::IsTerminal;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,6 +11,7 @@ use tracing_subscriber::EnvFilter;
 async fn main() -> anyhow::Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     tracing_subscriber::fmt()
+        .with_ansi(std::io::stdout().is_terminal())
         .with_env_filter(
             EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| EnvFilter::new("info,tegata=info")),

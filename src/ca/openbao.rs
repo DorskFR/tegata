@@ -20,8 +20,21 @@ pub struct OpenBaoCa {
 }
 
 impl OpenBaoCa {
+    /// Retries for a minute: a fresh pod may not reach OpenBao until its network policy lands.
     pub async fn new(bao: Arc<OpenBao>, mount: String, role: String) -> anyhow::Result<Self> {
-        let ca_pem = bao.get_text(&format!("{mount}/ca/pem")).await?;
+        let path = format!("{mount}/ca/pem");
+        let mut attempt = 0;
+        let ca_pem = loop {
+            match bao.get_text(&path).await {
+                Ok(pem) => break pem,
+                Err(err) if attempt < 12 => {
+                    attempt += 1;
+                    tracing::warn!(error = %err, attempt, "OpenBao not reachable yet");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+                Err(err) => return Err(err.into()),
+            }
+        };
         let subject = subject_of(&ca_pem)?;
         Ok(Self { bao, mount, role, ca_pem, subject })
     }
