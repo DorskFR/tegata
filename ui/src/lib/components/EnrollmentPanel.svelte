@@ -34,10 +34,22 @@
 		</div>
 	</header>
 
+	{#snippet password()}
+		<div class="item">
+			<Text variant="label" tone="muted">Password</Text>
+			<div class="value">
+				<output class="password" aria-label="Certificate password">{enrollment.password}</output>
+				<CopyButton text={enrollment.password} label="Copy password" box="sm" />
+			</div>
+		</div>
+	{/snippet}
+
 	{#if installed}
-		<Callout tone="ok" title="Certificate installed">
-			The device downloaded its certificate. You can close this panel.
+		<Callout tone="ok" title="Downloaded">
+			The device has the file. Enter this password on it to finish installing, then close this
+			panel: the password is not shown again.
 		</Callout>
+		{@render password()}
 	{:else if expired}
 		<Callout tone="warn" title="Link expired">
 			Nobody downloaded the certificate in time. Use "New link" on the device to issue another one.
@@ -55,14 +67,7 @@
 						<CopyButton text={enrollment.url} label="Copy link" box="sm" />
 					</div>
 				</div>
-				<div class="item">
-					<Text variant="label" tone="muted">Password</Text>
-					<div class="value">
-						<output class="password" aria-label="Certificate password">{enrollment.password}</output
-						>
-						<CopyButton text={enrollment.password} label="Copy password" box="sm" />
-					</div>
-				</div>
+				{@render password()}
 				<div class="item">
 					<Text variant="label" tone="muted">Expires</Text>
 					<Text numeric size="lg" weight="medium" aria-live="polite">
