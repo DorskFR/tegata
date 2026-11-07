@@ -1,5 +1,6 @@
 <script lang="ts">
 	import {
+		Badge,
 		Button,
 		ConfirmModal,
 		CopyButton,
@@ -14,6 +15,7 @@
 	import { ApiError, api, type Config, type Created, type Device } from '#lib/api';
 	import DeviceDialog from '#lib/components/DeviceDialog.svelte';
 	import EnrollmentPanel from '#lib/components/EnrollmentPanel.svelte';
+	import GroupsDialog from '#lib/components/GroupsDialog.svelte';
 	import StatusBadge from '#lib/components/StatusBadge.svelte';
 	import { formatDate, relativeTime, shortFingerprint } from '#lib/format';
 
@@ -23,6 +25,9 @@
 	let dialogOpen = $state(false);
 	let dialogDevice = $state<Device | null>(null);
 	let dialogBusy = $state(false);
+	let groupsOpen = $state(false);
+	let groupsDevice = $state<Device | null>(null);
+	let groupsBusy = $state(false);
 	let panel = $state<Created | null>(null);
 	let confirm = $state<{ kind: 'revoke' | 'delete'; device: Device } | null>(null);
 	let confirmBusy = $state(false);
@@ -70,7 +75,29 @@
 		dialogOpen = true;
 	}
 
-	async function submitDialog(values: { name: string; owner: string; validity_days: number }) {
+	function openGroups(device: Device) {
+		groupsDevice = device;
+		groupsOpen = true;
+	}
+
+	async function submitGroups(groups: string[]) {
+		if (!groupsDevice) return;
+		groupsBusy = true;
+		try {
+			await api.devices.setGroups(groupsDevice.id, groups);
+			toasts.ok(`Updated groups of ${groupsDevice.name}`);
+			await refresh();
+		} finally {
+			groupsBusy = false;
+		}
+	}
+
+	async function submitDialog(values: {
+		name: string;
+		owner: string;
+		groups: string[];
+		validity_days: number;
+	}) {
 		dialogBusy = true;
 		try {
 			const created = dialogDevice
@@ -184,6 +211,13 @@
 					<div class="cell title">
 						<Text weight="medium" truncate>{d.name}</Text>
 						<Text size="sm" tone="muted" truncate>{d.owner}</Text>
+						{#if d.groups.length}
+							<ul class="groups" aria-label="Groups">
+								{#each d.groups as g (g)}
+									<li><Badge tone="accent" size="xs">{g}</Badge></li>
+								{/each}
+							</ul>
+						{/if}
 					</div>
 					<div class="cell status">
 						<StatusBadge status={d.status} />
@@ -238,6 +272,7 @@
 								New link
 							</Button>
 						{/if}
+						<Button size="sm" variant="ghost" onclick={() => openGroups(d)}>Edit groups</Button>
 						{#if d.status !== 'revoked'}
 							<Button size="sm" variant="ghost" onclick={() => openRotate(d)} disabled={!config}>
 								Rotate
@@ -276,6 +311,13 @@
 	device={dialogDevice}
 	busy={dialogBusy}
 	onsubmit={submitDialog}
+/>
+
+<GroupsDialog
+	bind:open={groupsOpen}
+	device={groupsDevice}
+	busy={groupsBusy}
+	onsubmit={submitGroups}
 />
 
 <ConfirmModal
@@ -330,6 +372,14 @@
 	}
 	.title {
 		grid-area: title;
+	}
+	.groups {
+		list-style: none;
+		margin: 2px 0 0;
+		padding: 0;
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--sp-1);
 	}
 	.status {
 		grid-area: status;

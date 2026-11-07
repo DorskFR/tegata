@@ -18,6 +18,7 @@ export type Device = {
 	id: string;
 	name: string;
 	owner: string;
+	groups: string[];
 	created_at: string;
 	status: DeviceStatus;
 	cert: Cert | null;
@@ -35,6 +36,14 @@ export type Config = {
 	ca_not_after: string;
 };
 export type EnrollInfo = { device_name: string; expires_at: string };
+export type App = {
+	host: string;
+	restricted: boolean;
+	groups: string[];
+	first_seen: string | null;
+	last_seen: string | null;
+};
+export type AppAccess = { restricted: boolean; groups: string[] };
 
 export class ApiError extends Error {
 	constructor(
@@ -66,7 +75,7 @@ function tryJson(text: string): { error?: unknown } | null {
 	}
 }
 
-type Method = 'GET' | 'POST' | 'DELETE';
+type Method = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
 
 async function request<T>(method: Method, path: string, body?: unknown): Promise<T> {
 	const init: RequestInit = { method, credentials: 'same-origin', headers: {} };
@@ -104,8 +113,10 @@ export const api = {
 	},
 	devices: {
 		list: () => request<Device[]>('GET', '/api/devices'),
-		create: (body: { name: string; owner: string; validity_days: number }) =>
+		create: (body: { name: string; owner: string; groups?: string[]; validity_days: number }) =>
 			request<Created>('POST', '/api/devices', body),
+		setGroups: (id: string, groups: string[]) =>
+			request<Device>('PATCH', `/api/devices/${encodeURIComponent(id)}`, { groups }),
 		rotate: (id: string, validity_days?: number) =>
 			request<Created>(
 				'POST',
@@ -118,6 +129,14 @@ export const api = {
 			request<Device>('POST', `/api/devices/${encodeURIComponent(id)}/revoke`),
 		remove: (id: string) => request<void>('DELETE', `/api/devices/${encodeURIComponent(id)}`)
 	},
+	apps: {
+		list: () => request<App[]>('GET', '/api/apps'),
+		create: (host: string) => request<App>('POST', '/api/apps', { host }),
+		update: (host: string, access: AppAccess) =>
+			request<App>('PUT', `/api/apps/${encodeURIComponent(host)}`, access),
+		remove: (host: string) => request<void>('DELETE', `/api/apps/${encodeURIComponent(host)}`)
+	},
+	groups: () => request<string[]>('GET', '/api/groups'),
 	config: () => request<Config>('GET', '/api/config'),
 	enroll: (token: string) => request<EnrollInfo>('GET', `/api/enroll/${encodeURIComponent(token)}`)
 };

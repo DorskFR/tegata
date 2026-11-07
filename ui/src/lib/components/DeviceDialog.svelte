@@ -1,9 +1,11 @@
 <script lang="ts">
 	import { Button, Field, Input, Modal, Select, type SelectOption } from '@dorsk/tsumikit';
-	import type { Config, Device } from '#lib/api';
+	import { api, type Config, type Device } from '#lib/api';
 	import { validityLabel } from '#lib/format';
+	import { GROUP_HINT } from '#lib/groups';
+	import GroupsInput from './GroupsInput.svelte';
 
-	type Values = { name: string; owner: string; validity_days: number };
+	type Values = { name: string; owner: string; groups: string[]; validity_days: number };
 
 	let {
 		open = $bindable(false),
@@ -22,6 +24,9 @@
 	let name = $state('');
 	let owner = $state('');
 	let validity = $state('');
+	let groups = $state<string[]>([]);
+	let suggestions = $state<string[]>([]);
+	let groupsInput = $state<GroupsInput | null>(null);
 	let error = $state('');
 
 	const rotating = $derived(device !== null);
@@ -44,7 +49,14 @@
 			name = device?.name ?? '';
 			owner = device?.owner ?? '';
 			validity = String(config?.validity_days.default ?? presets[0] ?? 365);
+			groups = [];
 			error = '';
+			if (!device) {
+				api.groups().then(
+					(g) => (suggestions = g),
+					() => (suggestions = [])
+				);
+			}
 		}
 	});
 
@@ -63,9 +75,10 @@
 			error = 'Pick how long the certificate stays valid.';
 			return;
 		}
+		if (!rotating && groupsInput && !groupsInput.flush()) return;
 		error = '';
 		try {
-			await onsubmit({ name: name.trim(), owner: owner.trim(), validity_days: days });
+			await onsubmit({ name: name.trim(), owner: owner.trim(), groups, validity_days: days });
 			open = false;
 		} catch (err) {
 			error = err instanceof Error ? err.message : 'Something went wrong.';
@@ -88,6 +101,18 @@
 				</Field>
 				<Field label="Owner" for="device-owner">
 					<Input id="device-owner" bind:value={owner} autocomplete="off" required />
+				</Field>
+				<Field
+					label="Groups"
+					for="device-groups"
+					hint={`Optional. Restricted apps let the device in when it shares one of their groups. ${GROUP_HINT}`}
+				>
+					<GroupsInput
+						bind:this={groupsInput}
+						id="device-groups"
+						bind:value={groups}
+						{suggestions}
+					/>
 				</Field>
 			{/if}
 			<Field
