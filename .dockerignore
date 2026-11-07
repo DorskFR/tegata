@@ -1,0 +1,11 @@
+target/
+**/node_modules/
+ui/build/
+ui/.svelte-kit/
+data/
+.git/
+.github/
+.claude/
+*.log
+.env
+.env.*

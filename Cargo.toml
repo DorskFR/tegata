@@ -1,0 +1,62 @@
+[package]
+name = "tegata"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "WTFPL"
+description = "Mint, install, rotate and revoke mTLS client certificates for your own devices."
+readme = "README.md"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+doc_markdown = "allow"
+too_long_first_doc_paragraph = "allow"
+significant_drop_tightening = "allow"
+must_use_candidate = "allow"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+axum = "0.8"
+axum-extra = { version = "0.12", features = ["cookie"] }
+base64 = "0.23"
+clap = { version = "4", features = ["derive", "env"] }
+hex = "0.4"
+mime_guess = "2"
+p12-keystore = "0.4"
+pem = "3"
+rand = "0.10"
+rcgen = { version = "0.14", features = ["x509-parser"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "http2", "charset"] }
+rust-embed = "8"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+thiserror = "2"
+time = { version = "0.3", features = ["serde", "formatting", "parsing", "macros"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.7", features = ["trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+url = "2"
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+webauthn-rs = "0.6"
+x509-parser = "0.18"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

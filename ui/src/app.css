@@ -1,0 +1,39 @@
+@import '@dorsk/tsumikit/styles/app.css';
+
+:root {
+	--content-max: 64rem;
+}
+
+.page {
+	display: flex;
+	flex-direction: column;
+	gap: var(--sp-5);
+	padding-block: var(--sp-4) var(--sp-8);
+}
+
+.brand {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--sp-2);
+	color: var(--text);
+	font-weight: 600;
+	letter-spacing: 0.01em;
+	text-decoration: none;
+}
+
+.brand svg {
+	width: 1.5rem;
+	height: 1.5rem;
+}
+
+.center-card {
+	width: 100%;
+	max-width: 26rem;
+	margin: var(--sp-8) auto 0;
+}
+
+@media (max-width: 30rem) {
+	.center-card {
+		margin-top: var(--sp-4);
+	}
+}
