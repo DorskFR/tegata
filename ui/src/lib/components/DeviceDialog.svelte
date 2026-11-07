@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { Button, Field, Input, Modal, Select, type SelectOption } from '@dorsk/tsumikit';
 	import type { Config, Device } from '#lib/api';
-	import { pluralDays } from '#lib/format';
+	import { validityLabel } from '#lib/format';
 
 	type Values = { name: string; owner: string; validity_days: number };
 
@@ -33,7 +33,10 @@
 		return list.filter((d) => d <= config.validity_days.max).sort((a, b) => a - b);
 	});
 	const options: SelectOption[] = $derived(
-		presets.map((d) => ({ value: String(d), label: pluralDays(d) }))
+		presets.map((d) => ({
+			value: String(d),
+			label: validityLabel(d, config?.validity_days.max ?? 0, config?.ca_not_after ?? null)
+		}))
 	);
 
 	$effect(() => {

@@ -69,3 +69,17 @@ export function formatDate(iso: string | null | undefined): string {
 export function pluralDays(n: number): string {
 	return n === 1 ? '1 day' : `${n} days`;
 }
+
+export function validityLabel(days: number, max: number, caNotAfter: string | null): string {
+	if (days === max && caNotAfter) {
+		const d = new Date(caNotAfter);
+		if (!Number.isNaN(d.getTime())) {
+			return `Until the CA expires (${d.toLocaleDateString(undefined, { dateStyle: 'medium' })})`;
+		}
+	}
+	if (days % 365 === 0) {
+		const years = days / 365;
+		return years === 1 ? '1 year' : `${years} years`;
+	}
+	return pluralDays(days);
+}

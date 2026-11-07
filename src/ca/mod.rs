@@ -32,6 +32,7 @@ pub trait Ca: Send + Sync {
     async fn crl_pem(&self) -> anyhow::Result<String>;
     fn ca_pem(&self) -> &str;
     fn subject(&self) -> &str;
+    fn not_after(&self) -> OffsetDateTime;
 }
 
 pub fn subject_of(pem: &str) -> anyhow::Result<String> {
@@ -39,6 +40,10 @@ pub fn subject_of(pem: &str) -> anyhow::Result<String> {
     let (_, cert) = x509_parser::parse_x509_certificate(block.contents())
         .map_err(|e| anyhow::anyhow!("parsing CA certificate: {e}"))?;
     Ok(cert.subject().to_string())
+}
+
+pub fn pem_not_after(pem: &str) -> anyhow::Result<OffsetDateTime> {
+    Ok(validity_of(::pem::parse(pem)?.contents())?.1)
 }
 
 pub fn validity_of(der: &[u8]) -> anyhow::Result<(OffsetDateTime, OffsetDateTime)> {

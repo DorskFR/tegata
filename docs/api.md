@@ -78,6 +78,7 @@ type Config = {
   expiring_days: number;
   enrollment_minutes: number;
   ca_subject: string;
+  ca_not_after: string;     // the longest preset ends here
 };
 ```
 

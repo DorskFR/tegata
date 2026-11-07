@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
 use tokio::sync::Mutex;
 
-use super::{Ca, Issued, subject_of};
+use super::{Ca, Issued, pem_not_after, subject_of};
 use crate::util::{format_serial, normalize_serial, now};
 
 #[derive(Default, Serialize, Deserialize)]
@@ -26,6 +26,7 @@ pub struct LocalCa {
     cert_pem: String,
     key: KeyPair,
     subject: String,
+    not_after: OffsetDateTime,
     revoked: Mutex<Revoked>,
 }
 
@@ -58,7 +59,8 @@ impl LocalCa {
             Err(e) => return Err(e.into()),
         };
         let subject = subject_of(&cert_pem)?;
-        Ok(Self { dir, cert_pem, key, subject, revoked: Mutex::new(revoked) })
+        let not_after = pem_not_after(&cert_pem)?;
+        Ok(Self { dir, cert_pem, key, subject, not_after, revoked: Mutex::new(revoked) })
     }
 
     fn issuer(&self) -> anyhow::Result<Issuer<'_, &KeyPair>> {
@@ -153,5 +155,9 @@ impl Ca for LocalCa {
 
     fn subject(&self) -> &str {
         &self.subject
+    }
+
+    fn not_after(&self) -> OffsetDateTime {
+        self.not_after
     }
 }

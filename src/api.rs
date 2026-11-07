@@ -32,6 +32,7 @@ pub async fn config(State(app): State<AppState>, _: Admin) -> Json<Value> {
         "expiring_days": s.expiring_days,
         "enrollment_minutes": s.enrollment_minutes,
         "ca_subject": app.ca.subject(),
+        "ca_not_after": app.ca.not_after().format(&time::format_description::well_known::Rfc3339).ok(),
     }))
 }
 
