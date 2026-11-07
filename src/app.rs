@@ -14,7 +14,8 @@ use crate::db::Db;
 use crate::enroll::{Enrollments, Pending};
 use crate::error::{ApiError, ApiResult};
 use crate::kube::ConfigMapWriter;
-use crate::model::{CertRecord, CertState, Device, DeviceView, Seen, State};
+use crate::model::{AppRule, CertRecord, CertState, Device, DeviceView, Seen, State};
+use crate::rules::{clean_groups, normalize_host};
 use crate::util::{now, password, random_token};
 
 pub struct Settings {
@@ -50,8 +51,11 @@ pub struct App {
     pub auth: Auth,
     pub trust: Option<ConfigMapWriter>,
     seen: Mutex<HashMap<String, Seen>>,
+    hosts_seen: Mutex<HashMap<String, OffsetDateTime>>,
     publish_lock: Mutex<()>,
 }
+
+const MAX_TRACKED_HOSTS: usize = 1000;
 
 pub type AppState = Arc<App>;
 
@@ -111,6 +115,7 @@ impl App {
             auth,
             trust,
             seen: Mutex::new(HashMap::new()),
+            hosts_seen: Mutex::new(HashMap::new()),
             publish_lock: Mutex::new(()),
         }
     }
@@ -189,10 +194,12 @@ impl App {
         &self,
         name: &str,
         owner: &str,
+        groups: &[String],
         validity_days: Option<u32>,
     ) -> ApiResult<Created> {
         let name = clean_label(name, "name", true)?;
         let owner = clean_label(owner, "owner", false)?;
+        let groups = clean_groups(groups)?;
         let validity = self.validity(validity_days)?;
         let taken = |s: &State| s.devices.iter().any(|d| d.name.eq_ignore_ascii_case(&name));
         if taken(&self.db.read().await) {
@@ -213,6 +220,7 @@ impl App {
                     id,
                     name: name.clone(),
                     owner: owner.clone(),
+                    groups: groups.clone(),
                     created_at: now(),
                     certs: vec![record.clone()],
                     last_seen: None,
@@ -421,6 +429,7 @@ impl App {
     pub async fn authorize(
         &self,
         fingerprint: Option<&str>,
+        host: Option<&str>,
         ip: Option<String>,
         user_agent: Option<String>,
     ) -> AuthzDecision {
@@ -428,20 +437,35 @@ impl App {
             return AuthzDecision::Deny;
         };
         let t = now();
+        let host = host.and_then(normalize_host);
+        if let Some(host) = &host {
+            let mut hosts = self.hosts_seen.lock().await;
+            if hosts.len() < MAX_TRACKED_HOSTS || hosts.contains_key(host) {
+                hosts.insert(host.clone(), t);
+            }
+        }
         let state = self.db.read().await;
+        let rule = host.as_ref().and_then(|h| state.apps.iter().find(|a| &a.host == h));
         let found = state.devices.iter().find_map(|d| {
             d.certs.iter().find(|c| c.fingerprint_sha256 == fingerprint).map(|c| (d, c))
         });
         match found {
             Some((device, cert)) if cert.state(t) == CertState::Active => {
-                self.seen.lock().await.insert(fingerprint, Seen { at: t, ip, user_agent });
+                self.seen
+                    .lock()
+                    .await
+                    .insert(fingerprint, Seen { at: t, ip: ip.clone(), user_agent });
+                if rule.is_some_and(|r| !r.admits(&device.groups)) {
+                    tracing::info!(device = %device.name, ?host, ?ip, "device is not allowed on this app");
+                    return AuthzDecision::Deny;
+                }
                 AuthzDecision::Allow { device: device.name.clone() }
             }
             Some((device, cert)) => {
                 tracing::warn!(device = %device.name, serial = %cert.serial, ?ip, state = ?cert.state(t), "rejected a certificate that is no longer valid");
                 AuthzDecision::Deny
             }
-            None if self.settings.authz_allow_unknown => {
+            None if self.settings.authz_allow_unknown && rule.is_none_or(|r| !r.restricted) => {
                 AuthzDecision::Allow { device: String::new() }
             }
             None => {
@@ -453,11 +477,29 @@ impl App {
 
     pub async fn flush_seen(&self) -> anyhow::Result<()> {
         let seen = std::mem::take(&mut *self.seen.lock().await);
-        if seen.is_empty() {
+        let hosts = std::mem::take(&mut *self.hosts_seen.lock().await);
+        if seen.is_empty() && hosts.is_empty() {
             return Ok(());
         }
         self.db
             .update(|s| {
+                for (host, at) in &hosts {
+                    match s.apps.iter_mut().find(|a| &a.host == host) {
+                        Some(app) => {
+                            if app.last_seen.is_none_or(|old| old < *at) {
+                                app.last_seen = Some(*at);
+                            }
+                            app.first_seen.get_or_insert(*at);
+                        }
+                        None => s.apps.push(AppRule {
+                            host: host.clone(),
+                            restricted: false,
+                            groups: Vec::new(),
+                            first_seen: Some(*at),
+                            last_seen: Some(*at),
+                        }),
+                    }
+                }
                 for d in &mut s.devices {
                     let latest = d
                         .certs

@@ -76,8 +76,19 @@ impl Harness {
     }
 
     async fn authz_at(&self, uri: &str, fingerprint: &str) -> StatusCode {
-        let req = Request::builder()
-            .uri(uri)
+        self.authz_full(uri, fingerprint, None).await
+    }
+
+    async fn authz_host(&self, host: &str, fingerprint: &str) -> StatusCode {
+        self.authz_full("/authz/", fingerprint, Some(host)).await
+    }
+
+    async fn authz_full(&self, uri: &str, fingerprint: &str, host: Option<&str>) -> StatusCode {
+        let mut req = Request::builder().uri(uri);
+        if let Some(host) = host {
+            req = req.header(header::HOST, host);
+        }
+        let req = req
             .header("x-forwarded-client-cert", format!("Hash={fingerprint};Subject=\"CN=x\""))
             .header("x-forwarded-for", "203.0.113.7")
             .body(Body::empty())
@@ -318,4 +329,107 @@ async fn validity_reaches_the_ca_lifetime() {
         .json("POST", "/api/devices", Some(json!({"name": "too-long", "validity_days": max + 1})))
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+async fn installed(h: &Harness, name: &str, groups: &[&str]) -> String {
+    let (status, created) =
+        h.json("POST", "/api/devices", Some(json!({"name": name, "groups": groups}))).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let (status, _, _) =
+        h.call("GET", &format!("/enroll/{}/device.p12", token_of(&created)), None, false).await;
+    assert_eq!(status, StatusCode::OK);
+    created["device"]["cert"]["fingerprint_sha256"].as_str().unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn app_rules() {
+    let h = harness().await;
+    let admin = installed(&h, "laptop", &["Admin", "family"]).await;
+    let kid = installed(&h, "tablet", &["family"]).await;
+
+    assert_eq!(h.authz_host("Media.Example.com:443", &kid).await, StatusCode::OK);
+    assert_eq!(h.authz_host("nas.example.com", &admin).await, StatusCode::OK);
+    h.app.flush_seen().await.unwrap();
+    let (_, apps) = h.json("GET", "/api/apps", None).await;
+    let hosts: Vec<&str> =
+        apps.as_array().unwrap().iter().map(|a| a["host"].as_str().unwrap()).collect();
+    assert_eq!(hosts, ["media.example.com", "nas.example.com"], "apps are learned from traffic");
+    assert_eq!(apps[0]["restricted"], false);
+    assert!(apps[0]["first_seen"].is_string());
+
+    let (status, _) =
+        h.json("PUT", "/api/apps/nas.example.com", Some(json!({"restricted": true}))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "restricting needs a group");
+    let (status, rule) = h
+        .json(
+            "PUT",
+            "/api/apps/nas.example.com",
+            Some(json!({"restricted": true, "groups": ["ADMIN"]})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{rule}");
+    assert_eq!(rule["groups"], json!(["admin"]));
+
+    assert_eq!(h.authz_host("nas.example.com", &admin).await, StatusCode::OK);
+    assert_eq!(h.authz_host("nas.example.com", &kid).await, StatusCode::FORBIDDEN);
+    assert_eq!(
+        h.authz_host("media.example.com", &kid).await,
+        StatusCode::OK,
+        "open apps stay open"
+    );
+
+    let (_, devices) = h.json("GET", "/api/devices", None).await;
+    let tablet = devices.as_array().unwrap().iter().find(|d| d["name"] == "tablet").unwrap();
+    assert_eq!(tablet["groups"], json!(["family"]));
+    let id = tablet["id"].as_str().unwrap();
+    let (status, patched) = h
+        .json("PATCH", &format!("/api/devices/{id}"), Some(json!({"groups": ["family", "admin"]})))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(patched["groups"], json!(["admin", "family"]));
+    assert_eq!(h.authz_host("nas.example.com", &kid).await, StatusCode::OK);
+
+    let (_, groups) = h.json("GET", "/api/groups", None).await;
+    assert_eq!(groups, json!(["admin", "family"]));
+
+    let (status, _) = h.json("POST", "/api/apps", Some(json!({"host": "new.example.com"}))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = h.json("POST", "/api/apps", Some(json!({"host": "NEW.example.com"}))).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _) = h.json("POST", "/api/apps", Some(json!({"host": "not a host"}))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = h.json("DELETE", "/api/apps/new.example.com", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) =
+        h.json("PATCH", &format!("/api/devices/{id}"), Some(json!({"groups": ["a b"]}))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn unknown_certificates_only_reach_open_apps() {
+    let dir = std::env::temp_dir().join(format!("tegata-unknown-{}", uuid::Uuid::new_v4()));
+    let cli = <Cli as clap::Parser>::parse_from([
+        "tegata",
+        "--public-url",
+        ORIGIN,
+        "--backend",
+        "memory",
+        "--data-dir",
+        dir.to_str().unwrap(),
+        "--authz-allow-unknown",
+    ]);
+    let app: Arc<App> = Arc::new(cli.build().await.unwrap());
+    let session = app.auth.open_session(1).await;
+    let h = Harness { app, dir, cookie: format!("tegata_session={session}") };
+    assert_eq!(h.authz_host("open.example.com", "00aa").await, StatusCode::OK);
+    h.app.flush_seen().await.unwrap();
+    h.json("POST", "/api/apps", Some(json!({"host": "locked.example.com"}))).await;
+    h.json(
+        "PUT",
+        "/api/apps/locked.example.com",
+        Some(json!({"restricted": true, "groups": ["admin"]})),
+    )
+    .await;
+    assert_eq!(h.authz_host("locked.example.com", "00aa").await, StatusCode::FORBIDDEN);
+    assert_eq!(h.authz_host("open.example.com", "00aa").await, StatusCode::OK);
 }

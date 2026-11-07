@@ -123,6 +123,8 @@ pub struct NewDevice {
     name: String,
     #[serde(default)]
     owner: String,
+    #[serde(default)]
+    groups: Vec<String>,
     validity_days: Option<u32>,
 }
 
@@ -131,7 +133,8 @@ pub async fn create_device(
     _: Admin,
     Json(body): Json<NewDevice>,
 ) -> ApiResult<impl IntoResponse> {
-    let created = app.create_device(&body.name, &body.owner, body.validity_days).await?;
+    let created =
+        app.create_device(&body.name, &body.owner, &body.groups, body.validity_days).await?;
     Ok((StatusCode::CREATED, Json(created)))
 }
 
@@ -230,4 +233,64 @@ pub async fn crl_pem(State(app): State<AppState>) -> ApiResult<Response> {
     resp.headers_mut()
         .insert(header::CONTENT_TYPE, HeaderValue::from_static("application/x-pem-file"));
     Ok(resp)
+}
+
+#[derive(Deserialize)]
+pub struct DevicePatch {
+    groups: Vec<String>,
+}
+
+pub async fn patch_device(
+    State(app): State<AppState>,
+    _: Admin,
+    Path(id): Path<Uuid>,
+    Json(body): Json<DevicePatch>,
+) -> ApiResult<impl IntoResponse> {
+    Ok(Json(app.set_device_groups(id, &body.groups).await?))
+}
+
+pub async fn groups(State(app): State<AppState>, _: Admin) -> impl IntoResponse {
+    Json(app.groups().await)
+}
+
+pub async fn apps(State(app): State<AppState>, _: Admin) -> impl IntoResponse {
+    Json(app.apps().await)
+}
+
+#[derive(Deserialize)]
+pub struct NewApp {
+    host: String,
+}
+
+pub async fn add_app(
+    State(app): State<AppState>,
+    _: Admin,
+    Json(body): Json<NewApp>,
+) -> ApiResult<impl IntoResponse> {
+    Ok((StatusCode::CREATED, Json(app.add_app(&body.host).await?)))
+}
+
+#[derive(Deserialize)]
+pub struct AppRuleBody {
+    restricted: bool,
+    #[serde(default)]
+    groups: Vec<String>,
+}
+
+pub async fn set_app_rule(
+    State(app): State<AppState>,
+    _: Admin,
+    Path(host): Path<String>,
+    Json(body): Json<AppRuleBody>,
+) -> ApiResult<impl IntoResponse> {
+    Ok(Json(app.set_app_rule(&host, body.restricted, &body.groups).await?))
+}
+
+pub async fn remove_app(
+    State(app): State<AppState>,
+    _: Admin,
+    Path(host): Path<String>,
+) -> ApiResult<StatusCode> {
+    app.remove_app(&host).await?;
+    Ok(StatusCode::NO_CONTENT)
 }

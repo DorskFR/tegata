@@ -9,6 +9,29 @@ pub struct State {
     pub devices: Vec<Device>,
     #[serde(default)]
     pub passkeys: Vec<PasskeyRecord>,
+    #[serde(default)]
+    pub apps: Vec<AppRule>,
+}
+
+/// A hostname behind the gateway. Open to every valid device unless `restricted`, in
+/// which case only devices sharing one of `groups` pass.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppRule {
+    pub host: String,
+    #[serde(default)]
+    pub restricted: bool,
+    #[serde(default)]
+    pub groups: Vec<String>,
+    #[serde(with = "time::serde::rfc3339::option", default)]
+    pub first_seen: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option", default)]
+    pub last_seen: Option<OffsetDateTime>,
+}
+
+impl AppRule {
+    pub fn admits(&self, groups: &[String]) -> bool {
+        !self.restricted || groups.iter().any(|g| self.groups.contains(g))
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -16,6 +39,8 @@ pub struct Device {
     pub id: Uuid,
     pub name: String,
     pub owner: String,
+    #[serde(default)]
+    pub groups: Vec<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
     /// Oldest first.
@@ -138,6 +163,7 @@ pub struct DeviceView {
     pub id: Uuid,
     pub name: String,
     pub owner: String,
+    pub groups: Vec<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
     pub status: DeviceStatus,
@@ -198,6 +224,7 @@ impl DeviceView {
             id: device.id,
             name: device.name.clone(),
             owner: device.owner.clone(),
+            groups: device.groups.clone(),
             created_at: device.created_at,
             status,
             cert: current.map(|c| CertView::new(c, now)),
@@ -238,6 +265,7 @@ mod tests {
             id: Uuid::new_v4(),
             name: "phone".into(),
             owner: "me".into(),
+            groups: Vec::new(),
             created_at: datetime!(2030-01-01 0:00 UTC),
             certs,
             last_seen: None,
