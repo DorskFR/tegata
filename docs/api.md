@@ -38,7 +38,8 @@ type Passkey = { id: string; name: string; created_at: string; last_used_at: str
 | Method | Path | Body | Response |
 |---|---|---|---|
 | GET | `/api/devices` | | `Device[]` |
-| POST | `/api/devices` | `{ "name": string, "owner": string, "validity_days": number }` | `Created` |
+| POST | `/api/devices` | `{ "name": string, "owner": string, "groups"?: string[], "validity_days": number }` | `Created` |
+| PATCH | `/api/devices/{id}` | `{ "groups": string[] }` | `Device` |
 | POST | `/api/devices/{id}/rotate` | `{ "validity_days"?: number }` | `Created` |
 | POST | `/api/devices/{id}/enrollment` | | `Created` (new link + password for a still-pending cert) |
 | POST | `/api/devices/{id}/revoke` | | `Device` |
@@ -62,6 +63,8 @@ type Device = {
   id: string;
   name: string;
   owner: string;
+  groups: string[];         // lowercase, sorted; letters, digits, - and _
+
   created_at: string;
   status: DeviceStatus;
   cert: Cert | null;        // the cert currently in use
@@ -84,6 +87,31 @@ type Config = {
 
 `expiring` means active with fewer than `expiring_days` left. Rotation issues a new
 cert; the old one is revoked automatically the first time the new one is downloaded.
+
+## Apps
+
+Apps are hostnames behind the gateway. tegata learns them from `/authz` traffic, or
+they can be added by hand. An app is open to every valid device until it is
+`restricted`; then only devices sharing one of its `groups` pass. Certificates tegata
+did not issue (allowed with `TEGATA_AUTHZ_ALLOW_UNKNOWN`) only pass open apps.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/api/apps` | | `App[]`, sorted by host |
+| POST | `/api/apps` | `{ "host": string }` | `201 App` |
+| PUT | `/api/apps/{host}` | `{ "restricted": boolean, "groups": string[] }` | `App` (restricted needs a group) |
+| DELETE | `/api/apps/{host}` | | `204` (comes back if traffic continues) |
+| GET | `/api/groups` | | `string[]`, every group used by a device or an app |
+
+```ts
+type App = {
+  host: string;
+  restricted: boolean;
+  groups: string[];
+  first_seen: string | null;
+  last_seen: string | null;
+};
+```
 
 ## Enrollment (public, no session)
 

@@ -42,6 +42,12 @@
 			<nav class="nav" aria-label="Main">
 				<a href={resolve('/(app)')} aria-current={path === '/' ? 'page' : undefined}>Devices</a>
 				<a
+					href={resolve('/(app)/apps')}
+					aria-current={path.startsWith('/apps') ? 'page' : undefined}
+				>
+					Apps
+				</a>
+				<a
 					href={resolve('/(app)/passkeys')}
 					aria-current={path.startsWith('/passkeys') ? 'page' : undefined}
 				>
@@ -121,9 +127,19 @@
 	@media (max-width: 30rem) {
 		.bar {
 			gap: var(--sp-2);
+			padding-inline: var(--sp-3);
+		}
+		.bar :global(.brand span) {
+			display: none;
+		}
+		.nav {
+			min-width: 0;
+			overflow-x: auto;
+			scrollbar-width: none;
 		}
 		.nav a {
 			padding-inline: var(--sp-2);
+			white-space: nowrap;
 		}
 	}
 </style>

@@ -11,6 +11,7 @@ pub mod error;
 pub mod kube;
 pub mod model;
 pub mod openbao;
+pub mod rules;
 pub mod store;
 pub mod util;
 pub mod web;
@@ -22,7 +23,7 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderValue, Method, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{any, delete, get, post};
+use axum::routing::{any, delete, get, post, put};
 
 pub use crate::app::{App, AppState};
 use crate::error::ApiError;
@@ -41,7 +42,10 @@ pub fn router(app: AppState) -> Router {
         .route("/passkeys", get(api::passkeys))
         .route("/passkeys/{id}", delete(api::delete_passkey))
         .route("/devices", get(api::devices).post(api::create_device))
-        .route("/devices/{id}", delete(api::delete_device))
+        .route("/devices/{id}", delete(api::delete_device).patch(api::patch_device))
+        .route("/groups", get(api::groups))
+        .route("/apps", get(api::apps).post(api::add_app))
+        .route("/apps/{host}", put(api::set_app_rule).delete(api::remove_app))
         .route("/devices/{id}/rotate", post(api::rotate))
         .route("/devices/{id}/enrollment", post(api::new_enrollment))
         .route("/devices/{id}/revoke", post(api::revoke))

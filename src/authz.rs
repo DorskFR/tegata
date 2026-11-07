@@ -47,7 +47,10 @@ pub async fn check(State(app): State<AppState>, headers: HeaderMap) -> Response 
         .get("user-agent")
         .and_then(|v| v.to_str().ok())
         .map(|ua| ua.chars().take(256).collect());
-    match app.authorize(hash.as_deref(), client_ip(&headers), user_agent).await {
+    let host = ["x-forwarded-host", "host"]
+        .iter()
+        .find_map(|name| headers.get(*name).and_then(|v| v.to_str().ok()));
+    match app.authorize(hash.as_deref(), host, client_ip(&headers), user_agent).await {
         AuthzDecision::Allow { device } => {
             let mut resp = StatusCode::OK.into_response();
             if let Ok(value) = HeaderValue::from_str(&device)
