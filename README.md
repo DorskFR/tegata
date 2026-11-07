@@ -45,7 +45,9 @@ TEGATA_PUBLIC_URL=http://localhost:8080 cargo run
 Open the URL, enter the setup token from the log and register a passkey. For UI work,
 run `make run` and `make ui/dev`, then use `http://localhost:5173`.
 
-Every setting is a flag or an environment variable: `tegata --help`.
+Every setting is a flag or an environment variable: `tegata --help`. On SIGTERM tegata
+keeps serving for `TEGATA_SHUTDOWN_DELAY_SECONDS` (default 5) so a proxy calling `/authz`
+can drop the endpoint first.
 
 ### OpenBao
 

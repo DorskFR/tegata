@@ -40,11 +40,19 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// On SIGTERM keep serving for `TEGATA_SHUTDOWN_DELAY_SECONDS` while the proxy drops this
+/// endpoint; a fail-closed gateway would otherwise refuse checks routed here meanwhile.
 async fn shutdown() {
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("installing the SIGTERM handler");
     tokio::select! {
-        _ = tokio::signal::ctrl_c() => {}
+        _ = tokio::signal::ctrl_c() => return,
         _ = term.recv() => {}
     }
+    let delay = std::env::var("TEGATA_SHUTDOWN_DELAY_SECONDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5);
+    tracing::info!(delay, "SIGTERM received, draining before shutdown");
+    tokio::time::sleep(Duration::from_secs(delay)).await;
 }
