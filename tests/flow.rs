@@ -72,8 +72,12 @@ impl Harness {
     }
 
     async fn authz(&self, fingerprint: &str) -> StatusCode {
+        self.authz_at("/authz/some/path", fingerprint).await
+    }
+
+    async fn authz_at(&self, uri: &str, fingerprint: &str) -> StatusCode {
         let req = Request::builder()
-            .uri("/authz/some/path")
+            .uri(uri)
             .header("x-forwarded-client-cert", format!("Hash={fingerprint};Subject=\"CN=x\""))
             .header("x-forwarded-for", "203.0.113.7")
             .body(Body::empty())
@@ -194,6 +198,9 @@ async fn device_lifecycle() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 
     assert_eq!(h.authz(&first_fp).await, StatusCode::OK);
+    for uri in ["/authz", "/authz/", "/authz?q=1", "/elsewhere"] {
+        assert_eq!(h.authz_at(uri, &first_fp).await, StatusCode::OK, "{uri}");
+    }
     assert_eq!(h.authz(&first_fp.to_uppercase()).await, StatusCode::OK);
     assert_eq!(h.authz("00ff").await, StatusCode::FORBIDDEN);
     h.app.flush_seen().await.unwrap();
