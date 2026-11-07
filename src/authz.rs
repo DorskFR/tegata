@@ -70,45 +70,40 @@ fn html_escape(s: &str) -> String {
 
 /// Envoy relays this to the browser as is, so a refusal reads as one.
 fn denied_page(reason: &DenyReason) -> Response {
-    let (title, detail) = match reason {
+    let fact = |k: &str, v: &str| format!("<dt>{k}</dt><dd>{}</dd>", html_escape(v));
+    let (title, detail, facts, hint) = match reason {
         DenyReason::NotAllowed { device, host } => (
-            "This device is not allowed here".to_owned(),
-            format!(
-                "<strong>{}</strong> is not in a group allowed on <strong>{}</strong>. \
-                 Ask whoever runs the gateway to change the device's groups or the app's access.",
-                html_escape(device),
-                html_escape(host)
-            ),
+            "This device is not allowed on this app",
+            "The app is restricted to some device groups, and this device is in none of them.",
+            fact("Device", device) + &fact("App", host),
+            "<strong>Need access?</strong> Add the device to one of the app's groups, or open \
+             the app to every device, from tegata's Apps page.",
         ),
         DenyReason::NoLongerValid { device } => (
-            "This certificate no longer works".to_owned(),
-            format!(
-                "The certificate for <strong>{}</strong> was revoked, replaced or has expired. \
-                 Remove it from this device and install its current one.",
-                html_escape(device)
-            ),
+            "This certificate no longer works",
+            "It was revoked, replaced by a newer one, or has expired.",
+            fact("Device", device),
+            "<strong>Fix it:</strong> remove this certificate from the device and install the \
+             device's current one (Rotate in tegata gives a fresh install link).",
         ),
         DenyReason::Unknown => (
-            "Unknown certificate".to_owned(),
-            "This certificate was not issued for any registered device.".to_owned(),
+            "Unknown certificate",
+            "The certificate this device presented was not issued for any registered device.",
+            String::new(),
+            "<strong>Fix it:</strong> enroll the device in tegata and install its own certificate.",
         ),
         DenyReason::NoCertificate => (
-            "Client certificate required".to_owned(),
-            "This site needs a client certificate installed on the device.".to_owned(),
+            "Client certificate required",
+            "This site only answers devices that present a client certificate.",
+            String::new(),
+            "<strong>Fix it:</strong> enroll the device in tegata and install its certificate.",
         ),
     };
-    let body = format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
-         <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
-         <title>403 · {title}</title><style>\
-         body{{font:16px/1.5 system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;\
-         background:#f4f5f7;color:#1c2330}}main{{max-width:32rem;margin:1.5rem;padding:2rem;background:#fff;\
-         border:1px solid #dde1e7;border-radius:12px}}h1{{font-size:1.25rem;margin:.25rem 0 .75rem}}\
-         p{{margin:0;color:#4a5363}}small{{color:#8a93a3;letter-spacing:.08em;text-transform:uppercase}}\
-         @media(prefers-color-scheme:dark){{body{{background:#14171c;color:#e6e9ee}}\
-         main{{background:#1c2027;border-color:#2c323c}}p{{color:#b3bac6}}}}</style></head>\
-         <body><main><small>403 · tegata</small><h1>{title}</h1><p>{detail}</p></main></body></html>"
-    );
+    let body = include_str!("denied.html")
+        .replace("{{TITLE}}", title)
+        .replace("{{DETAIL}}", detail)
+        .replace("{{FACTS}}", &facts)
+        .replace("{{HINT}}", hint);
     let mut resp = (StatusCode::FORBIDDEN, body).into_response();
     let headers = resp.headers_mut();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
@@ -147,5 +142,6 @@ mod tests {
         let body = String::from_utf8(body.to_vec()).unwrap();
         assert!(body.contains("&lt;tablet&gt;") && !body.contains("<tablet>"));
         assert!(body.contains("nas.example.com"));
+        assert!(!body.contains("{{"), "every placeholder is filled");
     }
 }
