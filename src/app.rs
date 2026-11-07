@@ -81,7 +81,14 @@ pub enum Download {
 
 pub enum AuthzDecision {
     Allow { device: String },
-    Deny,
+    Deny(DenyReason),
+}
+
+pub enum DenyReason {
+    NoCertificate,
+    NotAllowed { device: String, host: String },
+    NoLongerValid { device: String },
+    Unknown,
 }
 
 fn clean_label(raw: &str, what: &str, required: bool) -> ApiResult<String> {
@@ -440,7 +447,7 @@ impl App {
         user_agent: Option<String>,
     ) -> AuthzDecision {
         let Some(fingerprint) = fingerprint.map(str::to_ascii_lowercase) else {
-            return AuthzDecision::Deny;
+            return AuthzDecision::Deny(DenyReason::NoCertificate);
         };
         let t = now();
         let host = host.and_then(normalize_host);
@@ -463,20 +470,23 @@ impl App {
                     .insert(fingerprint, Seen { at: t, ip: ip.clone(), user_agent });
                 if rule.is_some_and(|r| !r.admits(&device.groups)) {
                     tracing::info!(device = %device.name, ?host, ?ip, "device is not allowed on this app");
-                    return AuthzDecision::Deny;
+                    return AuthzDecision::Deny(DenyReason::NotAllowed {
+                        device: device.name.clone(),
+                        host: host.unwrap_or_default(),
+                    });
                 }
                 AuthzDecision::Allow { device: device.name.clone() }
             }
             Some((device, cert)) => {
                 tracing::warn!(device = %device.name, serial = %cert.serial, ?ip, state = ?cert.state(t), "rejected a certificate that is no longer valid");
-                AuthzDecision::Deny
+                AuthzDecision::Deny(DenyReason::NoLongerValid { device: device.name.clone() })
             }
             None if self.settings.authz_allow_unknown && rule.is_none_or(|r| !r.restricted) => {
                 AuthzDecision::Allow { device: String::new() }
             }
             None => {
                 tracing::warn!(%fingerprint, ?ip, "rejected an unknown certificate");
-                AuthzDecision::Deny
+                AuthzDecision::Deny(DenyReason::Unknown)
             }
         }
     }
