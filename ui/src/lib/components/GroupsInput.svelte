@@ -1,4 +1,5 @@
 <script lang="ts">
+	import GroupBadge from './GroupBadge.svelte';
 	import { Badge, Input, Text } from '@dorsk/tsumikit';
 	import { GROUP_HINT, addGroups } from '#lib/groups';
 
@@ -59,15 +60,7 @@
 		<ul class="chips" aria-label="Selected groups">
 			{#each value as g (g)}
 				<li>
-					<Badge
-						tone="accent"
-						size="sm"
-						removable
-						onremove={() => remove(g)}
-						aria-label={`Remove ${g}`}
-					>
-						{g}
-					</Badge>
+					<GroupBadge group={g} removable onremove={() => remove(g)} aria-label={`Remove ${g}`} />
 				</li>
 			{/each}
 		</ul>

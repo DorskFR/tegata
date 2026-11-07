@@ -15,6 +15,10 @@ pub enum ApiError {
     NotFound,
     #[error("{0}")]
     Conflict(String),
+    /// The change would stop the caller's certificate from reaching tegata; resend
+    /// with `confirm_lockout` to apply it anyway.
+    #[error("{0}")]
+    LockOut(String),
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -33,6 +37,10 @@ impl IntoResponse for ApiError {
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
+            Self::LockOut(message) => {
+                return (StatusCode::CONFLICT, Json(json!({ "error": message, "lockout": true })))
+                    .into_response();
+            }
             Self::Internal(err) => {
                 tracing::error!(error = ?err, "request failed");
                 return (

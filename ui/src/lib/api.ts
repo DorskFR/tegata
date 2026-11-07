@@ -36,6 +36,9 @@ export type Config = {
 	enrollment_minutes: number;
 	ca_subject: string;
 	ca_not_after: string;
+	own_host: string | null;
+	/** The certificate behind this browser: null without a gateway, `name: null` when tegata did not issue it. */
+	this_device: { name: null } | { name: string; groups: string[] } | null;
 };
 export type EnrollInfo = { device_name: string; expires_at: string };
 export type App = {
@@ -50,7 +53,9 @@ export type AppAccess = { restricted: boolean; groups: string[] };
 export class ApiError extends Error {
 	constructor(
 		public readonly status: number,
-		message: string
+		message: string,
+		/** The change would shut this browser out of tegata; resend with `confirm_lockout`. */
+		public readonly lockout = false
 	) {
 		super(message);
 		this.name = 'ApiError';
@@ -63,15 +68,15 @@ export async function parseError(res: Response): Promise<ApiError> {
 	if (!text) return new ApiError(res.status, fallback);
 	const body = tryJson(text);
 	if (body && typeof body.error === 'string' && body.error) {
-		return new ApiError(res.status, body.error);
+		return new ApiError(res.status, body.error, body.lockout === true);
 	}
 	return new ApiError(res.status, fallback);
 }
 
-function tryJson(text: string): { error?: unknown } | null {
+function tryJson(text: string): { error?: unknown; lockout?: unknown } | null {
 	try {
 		const v: unknown = JSON.parse(text);
-		return v && typeof v === 'object' ? (v as { error?: unknown }) : null;
+		return v && typeof v === 'object' ? (v as { error?: unknown; lockout?: unknown }) : null;
 	} catch {
 		return null;
 	}
@@ -117,8 +122,11 @@ export const api = {
 		list: () => request<Device[]>('GET', '/api/devices'),
 		create: (body: { name: string; owner: string; groups?: string[]; validity_days: number }) =>
 			request<Created>('POST', '/api/devices', body),
-		setGroups: (id: string, groups: string[]) =>
-			request<Device>('PATCH', `/api/devices/${encodeURIComponent(id)}`, { groups }),
+		setGroups: (id: string, groups: string[], confirm_lockout = false) =>
+			request<Device>('PATCH', `/api/devices/${encodeURIComponent(id)}`, {
+				groups,
+				confirm_lockout
+			}),
 		rotate: (id: string, validity_days?: number) =>
 			request<Created>(
 				'POST',
@@ -134,8 +142,13 @@ export const api = {
 	apps: {
 		list: () => request<App[]>('GET', '/api/apps'),
 		create: (host: string) => request<App>('POST', '/api/apps', { host }),
-		update: (host: string, access: AppAccess) =>
-			request<App>('PUT', `/api/apps/${encodeURIComponent(host)}`, access),
+		update: (host: string, access: AppAccess, confirm_lockout = false) =>
+			request<App>('PUT', `/api/apps/${encodeURIComponent(host)}`, {
+				...access,
+				confirm_lockout
+			}),
+		updateMany: (hosts: string[], access: AppAccess, confirm_lockout = false) =>
+			request<App[]>('PUT', '/api/apps', { hosts, ...access, confirm_lockout }),
 		remove: (host: string) => request<void>('DELETE', `/api/apps/${encodeURIComponent(host)}`)
 	},
 	groups: () => request<string[]>('GET', '/api/groups'),

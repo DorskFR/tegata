@@ -53,9 +53,34 @@ describe('api urls', () => {
 		]);
 		expect(calls.map(([, init]) => init?.method)).toEqual(['PUT', 'DELETE', 'PATCH']);
 		expect(calls.map(([, init]) => init?.body)).toEqual([
-			'{"restricted":true,"groups":["x"]}',
+			'{"restricted":true,"groups":["x"],"confirm_lockout":false}',
 			'{}',
-			'{"groups":["g"]}'
+			'{"groups":["g"],"confirm_lockout":false}'
 		]);
+	});
+
+	it('sends a bulk access change and flags lockout warnings', async () => {
+		const calls: [string, RequestInit | undefined][] = [];
+		vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+			calls.push([url, init]);
+			return new Response('{"error":"This would lock you out of tegata.","lockout":true}', {
+				status: 409
+			});
+		});
+		try {
+			const err = await api.apps
+				.updateMany(['a.example.com', 'b.example.com'], { restricted: false, groups: [] }, true)
+				.catch((e: unknown) => e);
+			expect(err).toBeInstanceOf(ApiError);
+			expect((err as ApiError).lockout).toBe(true);
+			expect((err as ApiError).message).toBe('This would lock you out of tegata.');
+		} finally {
+			vi.unstubAllGlobals();
+		}
+		expect(calls[0]?.[0]).toBe('/api/apps');
+		expect(calls[0]?.[1]?.method).toBe('PUT');
+		expect(calls[0]?.[1]?.body).toBe(
+			'{"hosts":["a.example.com","b.example.com"],"restricted":false,"groups":[],"confirm_lockout":true}'
+		);
 	});
 });

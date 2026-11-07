@@ -6,15 +6,31 @@
 
 	let {
 		open = $bindable(false),
-		app,
+		apps,
 		busy = false,
 		onsubmit
 	}: {
 		open?: boolean;
-		app: App | null;
+		apps: App[];
 		busy?: boolean;
 		onsubmit: (access: AppAccess) => Promise<void>;
 	} = $props();
+
+	const title = $derived(
+		apps.length === 1 ? `Access to ${apps[0]?.host}` : `Access to ${apps.length} apps`
+	);
+
+	function sharedAccess(list: App[]): AppAccess {
+		const [first, ...others] = list;
+		const same =
+			first &&
+			others.every(
+				(a) => a.restricted === first.restricted && a.groups.join() === first.groups.join()
+			);
+		return same
+			? { restricted: first.restricted, groups: [...first.groups] }
+			: { restricted: false, groups: [] };
+	}
 
 	let restricted = $state(false);
 	let groups = $state<string[]>([]);
@@ -24,8 +40,7 @@
 
 	$effect(() => {
 		if (open) {
-			restricted = app?.restricted ?? false;
-			groups = [...(app?.groups ?? [])];
+			({ restricted, groups } = sharedAccess(apps));
 			error = '';
 			api.groups().then(
 				(g) => (suggestions = g),
@@ -51,9 +66,14 @@
 	}
 </script>
 
-<Modal title={`Access to ${app?.host ?? 'app'}`} bind:open {busy} size="sm">
+<Modal {title} bind:open {busy} size="sm">
 	{#snippet body()}
 		<form id="app-access-form" class="form" onsubmit={submit}>
+			{#if apps.length > 1}
+				<Text size="sm" tone="muted">
+					Replaces the access of {apps.map((a) => a.host).join(', ')}.
+				</Text>
+			{/if}
 			<div class="toggle">
 				<Switch id="app-restricted" bind:checked={restricted} label="Restrict to groups" />
 				<div class="toggle-text">
