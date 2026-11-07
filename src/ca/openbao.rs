@@ -28,10 +28,10 @@ impl OpenBaoCa {
         let ca_pem = loop {
             match bao.get_text(&path).await {
                 Ok(pem) => break pem,
-                Err(err) if attempt < 12 => {
+                Err(err) if attempt < 60 => {
                     attempt += 1;
                     tracing::warn!(error = %err, attempt, "OpenBao not reachable yet");
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
                 Err(err) => return Err(err.into()),
             }
