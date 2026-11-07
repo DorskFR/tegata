@@ -279,3 +279,43 @@ async fn sweeper_revokes_lost_enrollments() {
     assert_eq!(devices[0]["status"], "revoked");
     assert!(crl_serials(&h.app.ca.crl_pem().await.unwrap()).contains(&serial));
 }
+
+#[tokio::test]
+async fn validity_reaches_the_ca_lifetime() {
+    let h = harness().await;
+    let (status, config) = h.json("GET", "/api/config", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let max = config["validity_days"]["max"].as_u64().unwrap();
+    let presets: Vec<u64> = config["validity_days"]["presets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap())
+        .collect();
+    assert!(max > 3000, "the local CA lasts ten years, got {max}");
+    assert_eq!(presets.last(), Some(&max));
+    assert!(presets.contains(&1825));
+    assert_eq!(config["validity_days"]["default"], 365);
+
+    let ca_not_after = time::OffsetDateTime::parse(
+        config["ca_not_after"].as_str().unwrap(),
+        &time::format_description::well_known::Rfc3339,
+    )
+    .unwrap();
+    let (status, created) = h
+        .json("POST", "/api/devices", Some(json!({"name": "forever", "validity_days": max})))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let not_after = time::OffsetDateTime::parse(
+        created["device"]["cert"]["not_after"].as_str().unwrap(),
+        &time::format_description::well_known::Rfc3339,
+    )
+    .unwrap();
+    assert!(not_after <= ca_not_after);
+    assert!(ca_not_after - not_after < time::Duration::days(2));
+
+    let (status, _) = h
+        .json("POST", "/api/devices", Some(json!({"name": "too-long", "validity_days": max + 1})))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}

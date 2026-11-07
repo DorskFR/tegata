@@ -13,7 +13,7 @@ use crate::db::Db;
 use crate::kube::ConfigMapWriter;
 use crate::openbao::{self, OpenBao};
 use crate::store::{FileStore, MemoryStore, OpenBaoStore, Store};
-use crate::util::random_token;
+use crate::util::{now, random_token};
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum Backend {
@@ -67,10 +67,11 @@ pub struct Cli {
     #[arg(long, env = "TEGATA_OPENBAO_KV_PATH", default_value = "tegata/state")]
     pub openbao_kv_path: String,
 
-    #[arg(long, env = "TEGATA_DEFAULT_VALIDITY_DAYS", default_value_t = 90)]
+    #[arg(long, env = "TEGATA_DEFAULT_VALIDITY_DAYS", default_value_t = 365)]
     pub default_validity_days: u32,
-    #[arg(long, env = "TEGATA_MAX_VALIDITY_DAYS", default_value_t = 365)]
-    pub max_validity_days: u32,
+    /// Longest validity offered. Defaults to whatever the CA itself has left.
+    #[arg(long, env = "TEGATA_MAX_VALIDITY_DAYS")]
+    pub max_validity_days: Option<u32>,
     #[arg(long, env = "TEGATA_EXPIRING_DAYS", default_value_t = 14)]
     pub expiring_days: u32,
     #[arg(long, env = "TEGATA_ENROLLMENT_MINUTES", default_value_t = 30)]
@@ -107,9 +108,6 @@ impl Cli {
     }
 
     pub async fn build(self) -> anyhow::Result<App> {
-        if self.default_validity_days == 0 || self.default_validity_days > self.max_validity_days {
-            bail!("the default validity must be between 1 and the maximum validity");
-        }
         let (store, ca): (Arc<dyn Store>, Arc<dyn Ca>) = match self.backend {
             Backend::Local => (
                 Arc::new(FileStore::new(self.data_dir.join("state.json"))),
@@ -157,17 +155,24 @@ impl Cli {
                 .collect()
         };
         let setup_token = self.setup_token.clone().unwrap_or_else(random_token);
+        let ca_days = u32::try_from((ca.not_after() - now()).whole_days()).unwrap_or(0);
+        if ca_days == 0 {
+            bail!("the CA expires within a day; renew it before issuing certificates");
+        }
+        let max_validity_days = self.max_validity_days.map_or(ca_days, |m| m.clamp(1, ca_days));
+        let default_validity_days = self.default_validity_days.clamp(1, max_validity_days);
         let mut presets: Vec<u32> =
-            [30, 90, 180, 365].into_iter().filter(|d| *d <= self.max_validity_days).collect();
-        if !presets.contains(&self.default_validity_days) {
-            presets.push(self.default_validity_days);
+            [30, 90, 365, 730, 1825].into_iter().filter(|d| *d < max_validity_days).collect();
+        presets.push(max_validity_days);
+        if !presets.contains(&default_validity_days) {
+            presets.push(default_validity_days);
             presets.sort_unstable();
         }
         let settings = Settings {
             public_url: self.public_url.clone(),
             rp_name: self.rp_name.clone(),
-            default_validity_days: self.default_validity_days,
-            max_validity_days: self.max_validity_days,
+            default_validity_days,
+            max_validity_days,
             validity_presets: presets,
             expiring_days: self.expiring_days,
             enrollment_minutes: self.enrollment_minutes,

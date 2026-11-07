@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { formatCountdown, relativeTime, shortFingerprint, statusLabel, statusTone } from './format';
+import {
+	formatCountdown,
+	relativeTime,
+	shortFingerprint,
+	statusLabel,
+	statusTone,
+	validityLabel
+} from './format';
 
 const now = Date.parse('2026-01-01T12:00:00Z');
 const shift = (ms: number) => new Date(now + ms).toISOString();
@@ -51,5 +58,17 @@ describe('shortFingerprint', () => {
 	it('accepts colon-separated and bare hex', () => {
 		expect(shortFingerprint('AB:CD:EF:01:23:45:67:89')).toBe('abcd ef01 2345');
 		expect(shortFingerprint('abcdef0123456789abcdef', 2)).toBe('abcd ef01');
+	});
+});
+
+describe('validityLabel', () => {
+	it('names whole years and the CA limit', () => {
+		expect(validityLabel(30, 3650, null)).toBe('30 days');
+		expect(validityLabel(365, 3650, null)).toBe('1 year');
+		expect(validityLabel(1825, 3650, null)).toBe('5 years');
+		expect(validityLabel(3650, 3650, '2036-11-04T00:38:00Z')).toMatch(
+			/^Until the CA expires \(.+2036\)$/
+		);
+		expect(validityLabel(3650, 3650, 'nonsense')).toBe('10 years');
 	});
 });

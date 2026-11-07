@@ -4,9 +4,9 @@ use anyhow::Context;
 use async_trait::async_trait;
 use reqwest::Method;
 use serde_json::json;
-use time::Duration;
+use time::{Duration, OffsetDateTime};
 
-use super::{Ca, Issued, subject_of, validity_of};
+use super::{Ca, Issued, pem_not_after, subject_of, validity_of};
 use crate::openbao::OpenBao;
 use crate::util::normalize_serial;
 
@@ -17,6 +17,7 @@ pub struct OpenBaoCa {
     role: String,
     ca_pem: String,
     subject: String,
+    not_after: OffsetDateTime,
 }
 
 impl OpenBaoCa {
@@ -36,7 +37,8 @@ impl OpenBaoCa {
             }
         };
         let subject = subject_of(&ca_pem)?;
-        Ok(Self { bao, mount, role, ca_pem, subject })
+        let not_after = pem_not_after(&ca_pem)?;
+        Ok(Self { bao, mount, role, ca_pem, subject, not_after })
     }
 }
 
@@ -100,5 +102,9 @@ impl Ca for OpenBaoCa {
 
     fn subject(&self) -> &str {
         &self.subject
+    }
+
+    fn not_after(&self) -> OffsetDateTime {
+        self.not_after
     }
 }

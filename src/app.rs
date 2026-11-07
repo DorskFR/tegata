@@ -147,7 +147,8 @@ impl App {
         name: &str,
         validity: Duration,
     ) -> ApiResult<(CertRecord, Enrollment)> {
-        let issued = self.ca.issue(name, validity).await?;
+        let latest = self.ca.not_after() - Duration::minutes(5) - now();
+        let issued = self.ca.issue(name, validity.min(latest)).await?;
         let password = password();
         let p12 = bundle::pkcs12(&issued, name, &password)?;
         let mobileconfig = bundle::mobileconfig(device_id, name, &p12);
