@@ -1,8 +1,8 @@
 use axum::extract::State;
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
-use crate::app::{AppState, AuthzDecision};
+use crate::app::{AppState, AuthzDecision, DenyReason};
 
 /// The `Hash` (SHA-256 of the DER certificate) from the last element of an
 /// `x-forwarded-client-cert` header.
@@ -60,8 +60,55 @@ pub async fn check(State(app): State<AppState>, headers: HeaderMap) -> Response 
             }
             resp
         }
-        AuthzDecision::Deny => StatusCode::FORBIDDEN.into_response(),
+        AuthzDecision::Deny(reason) => denied_page(&reason),
     }
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+/// Envoy relays this to the browser as is, so a refusal reads as one.
+fn denied_page(reason: &DenyReason) -> Response {
+    let fact = |k: &str, v: &str| format!("<dt>{k}</dt><dd>{}</dd>", html_escape(v));
+    let (title, detail, facts, hint) = match reason {
+        DenyReason::NotAllowed { device, host } => (
+            "This device is not allowed on this app",
+            "The app is restricted to some device groups, and this device is in none of them.",
+            fact("Device", device) + &fact("App", host),
+            "<strong>Need access?</strong> Add the device to one of the app's groups, or open \
+             the app to every device, from tegata's Apps page.",
+        ),
+        DenyReason::NoLongerValid { device } => (
+            "This certificate no longer works",
+            "It was revoked, replaced by a newer one, or has expired.",
+            fact("Device", device),
+            "<strong>Fix it:</strong> remove this certificate from the device and install the \
+             device's current one (Rotate in tegata gives a fresh install link).",
+        ),
+        DenyReason::Unknown => (
+            "Unknown certificate",
+            "The certificate this device presented was not issued for any registered device.",
+            String::new(),
+            "<strong>Fix it:</strong> enroll the device in tegata and install its own certificate.",
+        ),
+        DenyReason::NoCertificate => (
+            "Client certificate required",
+            "This site only answers devices that present a client certificate.",
+            String::new(),
+            "<strong>Fix it:</strong> enroll the device in tegata and install its certificate.",
+        ),
+    };
+    let body = include_str!("denied.html")
+        .replace("{{TITLE}}", title)
+        .replace("{{DETAIL}}", detail)
+        .replace("{{FACTS}}", &facts)
+        .replace("{{HINT}}", hint);
+    let mut resp = (StatusCode::FORBIDDEN, body).into_response();
+    let headers = resp.headers_mut();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    resp
 }
 
 #[cfg(test)]
@@ -80,5 +127,21 @@ mod tests {
         );
         assert_eq!(xfcc_hash(r#"Subject="CN=no hash""#), None);
         assert_eq!(xfcc_hash(""), None);
+    }
+
+    #[tokio::test]
+    async fn refusals_explain_themselves() {
+        use http_body_util::BodyExt;
+        let resp = denied_page(&DenyReason::NotAllowed {
+            device: "<tablet>".into(),
+            host: "nas.example.com".into(),
+        });
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(resp.headers()[header::CONTENT_TYPE], "text/html; charset=utf-8");
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("&lt;tablet&gt;") && !body.contains("<tablet>"));
+        assert!(body.contains("nas.example.com"));
+        assert!(!body.contains("{{"), "every placeholder is filled");
     }
 }
