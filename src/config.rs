@@ -74,6 +74,9 @@ pub struct Cli {
     pub max_validity_days: Option<u32>,
     #[arg(long, env = "TEGATA_EXPIRING_DAYS", default_value_t = 14)]
     pub expiring_days: u32,
+    /// Flag devices in use but not seen for this many days; 0 turns it off.
+    #[arg(long, env = "TEGATA_STALE_DAYS", default_value_t = 30)]
+    pub stale_days: u32,
     #[arg(long, env = "TEGATA_ENROLLMENT_MINUTES", default_value_t = 30)]
     pub enrollment_minutes: u32,
     #[arg(long, env = "TEGATA_SESSION_HOURS", default_value_t = 12)]
@@ -175,6 +178,7 @@ impl Cli {
             max_validity_days,
             validity_presets: presets,
             expiring_days: self.expiring_days,
+            stale_days: self.stale_days,
             enrollment_minutes: self.enrollment_minutes,
             session_hours: self.session_hours,
             authz_allow_unknown: self.authz_allow_unknown,

@@ -25,6 +25,7 @@ pub struct Settings {
     pub max_validity_days: u32,
     pub validity_presets: Vec<u32>,
     pub expiring_days: u32,
+    pub stale_days: u32,
     pub enrollment_minutes: u32,
     pub session_hours: u32,
     pub authz_allow_unknown: bool,
@@ -125,7 +126,12 @@ impl App {
     }
 
     pub fn view(&self, device: &Device) -> DeviceView {
-        DeviceView::new(device, now(), self.expiring())
+        let t = now();
+        let view = DeviceView::new(device, t, self.expiring());
+        match self.settings.stale_days {
+            0 => view,
+            days => view.with_staleness(device, t, Duration::days(i64::from(days))),
+        }
     }
 
     pub async fn devices(&self) -> Vec<DeviceView> {
