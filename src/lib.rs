@@ -94,8 +94,19 @@ async fn security_headers(csp: HeaderValue, req: Request, next: Next) -> Respons
     resp
 }
 
-/// Sweeps stale enrollments every minute and refreshes the published CRL periodically.
+/// Sweeps stale enrollments every minute, refreshes the published CRL periodically and
+/// picks up other replicas' writes every couple of seconds.
 pub fn spawn_background(app: AppState, crl_every: Duration) {
+    let refresher = app.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(2));
+        loop {
+            tick.tick().await;
+            if let Err(err) = refresher.db.refresh().await {
+                tracing::warn!(error = ?err, "refreshing state failed");
+            }
+        }
+    });
     let sweeper = app.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(60));

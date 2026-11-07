@@ -1,11 +1,8 @@
-use std::collections::HashMap;
-
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum_extra::extract::CookieJar;
 use axum_extra::extract::cookie::{Cookie, SameSite};
-use time::{Duration, OffsetDateTime};
-use tokio::sync::Mutex;
+use time::Duration;
 use url::Url;
 use uuid::Uuid;
 use webauthn_rs::prelude::{
@@ -15,31 +12,16 @@ use webauthn_rs::prelude::{
 
 use crate::app::{App, AppState};
 use crate::error::{ApiError, ApiResult};
-use crate::model::PasskeyRecord;
+use crate::model::{CeremonyRecord, PasskeyRecord, RegistrationIntent, SessionRecord, State};
 use crate::util::{now, random_token, sha256_hex};
 
 pub const SESSION_COOKIE: &str = "tegata_session";
 const CHALLENGE_COOKIE: &str = "tegata_challenge";
 const CHALLENGE_TTL: Duration = Duration::minutes(5);
 
-struct Registration {
-    state: PasskeyRegistration,
-    name: String,
-    first: bool,
-    expires_at: OffsetDateTime,
-}
-
-struct Login {
-    state: PasskeyAuthentication,
-    expires_at: OffsetDateTime,
-}
-
 pub struct Auth {
     webauthn: Webauthn,
     user_id: Uuid,
-    sessions: Mutex<HashMap<String, OffsetDateTime>>,
-    registrations: Mutex<HashMap<String, Registration>>,
-    logins: Mutex<HashMap<String, Login>>,
 }
 
 impl Auth {
@@ -50,36 +32,7 @@ impl Auth {
         Ok(Self {
             webauthn,
             user_id: Uuid::new_v5(&Uuid::NAMESPACE_URL, public_url.as_str().as_bytes()),
-            sessions: Mutex::new(HashMap::new()),
-            registrations: Mutex::new(HashMap::new()),
-            logins: Mutex::new(HashMap::new()),
         })
-    }
-
-    pub async fn is_valid(&self, token: &str) -> bool {
-        let t = now();
-        let mut sessions = self.sessions.lock().await;
-        sessions.retain(|_, exp| *exp > t);
-        sessions.contains_key(&sha256_hex(token.as_bytes()))
-    }
-
-    pub async fn end_session(&self, token: &str) {
-        self.sessions.lock().await.remove(&sha256_hex(token.as_bytes()));
-    }
-
-    /// Opens a session without a passkey ceremony; for tests and tooling, never routed.
-    #[doc(hidden)]
-    pub async fn open_session(&self, hours: u32) -> String {
-        self.new_session(hours).await
-    }
-
-    async fn new_session(&self, hours: u32) -> String {
-        let token = random_token();
-        self.sessions
-            .lock()
-            .await
-            .insert(sha256_hex(token.as_bytes()), now() + Duration::hours(i64::from(hours)));
-        token
     }
 }
 
@@ -106,12 +59,106 @@ fn webauthn_error(err: impl std::fmt::Display) -> ApiError {
 
 pub async fn is_signed_in(app: &App, jar: &CookieJar) -> bool {
     match jar.get(SESSION_COOKIE) {
-        Some(c) => app.auth.is_valid(c.value()).await,
+        Some(c) => app.session_valid(c.value()).await,
         None => false,
     }
 }
 
+fn internal(err: impl std::fmt::Display) -> ApiError {
+    ApiError::Internal(anyhow::anyhow!("{err}"))
+}
+
 impl App {
+    /// Checks the cached state, then the store, since another replica may have opened it.
+    pub async fn session_valid(&self, token: &str) -> bool {
+        let hash = sha256_hex(token.as_bytes());
+        let found = |s: &State| {
+            let t = now();
+            s.sessions.iter().any(|x| x.token_hash == hash && x.expires_at > t)
+        };
+        if found(&self.db.read().await) {
+            return true;
+        }
+        if let Err(err) = self.db.refresh().await {
+            tracing::warn!(error = ?err, "refreshing state failed");
+        }
+        found(&self.db.read().await)
+    }
+
+    pub async fn end_session(&self, token: &str) -> ApiResult<()> {
+        let hash = sha256_hex(token.as_bytes());
+        self.db
+            .update(|s| {
+                s.prune(now());
+                s.sessions.retain(|x| x.token_hash != hash);
+                Ok::<_, ApiError>(())
+            })
+            .await
+    }
+
+    /// Opens a session without a passkey ceremony; for tests and tooling, never routed.
+    #[doc(hidden)]
+    pub async fn open_session(&self, hours: u32) -> ApiResult<String> {
+        self.new_session(hours).await
+    }
+
+    async fn new_session(&self, hours: u32) -> ApiResult<String> {
+        let token = random_token();
+        let record = SessionRecord {
+            token_hash: sha256_hex(token.as_bytes()),
+            expires_at: now() + Duration::hours(i64::from(hours)),
+        };
+        self.db
+            .update(|s| {
+                s.prune(now());
+                s.sessions.push(record.clone());
+                Ok::<_, ApiError>(())
+            })
+            .await?;
+        Ok(token)
+    }
+
+    async fn store_ceremony(
+        &self,
+        registration: Option<RegistrationIntent>,
+        state: serde_json::Value,
+    ) -> ApiResult<String> {
+        let id = random_token();
+        let record = CeremonyRecord {
+            id_hash: sha256_hex(id.as_bytes()),
+            registration,
+            state,
+            expires_at: now() + CHALLENGE_TTL,
+        };
+        self.db
+            .update(|s| {
+                s.prune(now());
+                s.ceremonies.push(record.clone());
+                Ok::<_, ApiError>(())
+            })
+            .await?;
+        Ok(id)
+    }
+
+    /// Removes and returns the ceremony; one check-and-set write, so it is used once.
+    async fn take_ceremony(&self, jar: &CookieJar) -> ApiResult<CeremonyRecord> {
+        let id = challenge_id(jar)?;
+        let hash = sha256_hex(id.as_bytes());
+        if let Err(err) = self.db.refresh().await {
+            tracing::warn!(error = ?err, "refreshing state failed");
+        }
+        self.db
+            .update(|s| {
+                s.prune(now());
+                let at =
+                    s.ceremonies.iter().position(|c| c.id_hash == hash).ok_or_else(|| {
+                        ApiError::bad_request("passkey ceremony expired, try again")
+                    })?;
+                Ok(s.ceremonies.remove(at))
+            })
+            .await
+    }
+
     pub async fn start_registration(
         &self,
         jar: CookieJar,
@@ -142,20 +189,11 @@ impl App {
                 &self.settings.rp_name,
                 Some(exclude),
             )
-            .map_err(|e| ApiError::Internal(anyhow::anyhow!("{e}")))?;
-        let id = random_token();
-        let mut regs = self.auth.registrations.lock().await;
-        let t = now();
-        regs.retain(|_, r| r.expires_at > t);
-        regs.insert(
-            id.clone(),
-            Registration {
-                state: reg,
-                name: name.to_owned(),
-                first,
-                expires_at: t + CHALLENGE_TTL,
-            },
-        );
+            .map_err(internal)?;
+        let intent = RegistrationIntent { name: name.to_owned(), first };
+        let id = self
+            .store_ceremony(Some(intent), serde_json::to_value(&reg).map_err(internal)?)
+            .await?;
         let jar =
             jar.add(cookie(CHALLENGE_COOKIE, id, CHALLENGE_TTL, self.settings.secure_cookies()));
         Ok((jar, challenge))
@@ -166,22 +204,19 @@ impl App {
         jar: CookieJar,
         credential: &RegisterPublicKeyCredential,
     ) -> ApiResult<CookieJar> {
-        let id = challenge_id(&jar)?;
-        let reg = self
-            .auth
-            .registrations
-            .lock()
-            .await
-            .remove(&id)
-            .filter(|r| r.expires_at > now())
+        let ceremony = self.take_ceremony(&jar).await?;
+        let reg = ceremony
+            .registration
             .ok_or_else(|| ApiError::bad_request("passkey ceremony expired, try again"))?;
+        let state: PasskeyRegistration =
+            serde_json::from_value(ceremony.state).map_err(internal)?;
         if !reg.first && !is_signed_in(self, &jar).await {
             return Err(ApiError::Unauthorized);
         }
         let passkey = self
             .auth
             .webauthn
-            .finish_passkey_registration(credential, &reg.state)
+            .finish_passkey_registration(credential, &state)
             .map_err(webauthn_error)?;
         self.db
             .update(|s| {
@@ -201,7 +236,7 @@ impl App {
         tracing::info!(name = %reg.name, "passkey registered");
         let jar = jar.remove(Cookie::build(CHALLENGE_COOKIE).path("/"));
         if reg.first {
-            let token = self.auth.new_session(self.settings.session_hours).await;
+            let token = self.new_session(self.settings.session_hours).await?;
             return Ok(jar.add(self.session_cookie(token)));
         }
         Ok(jar)
@@ -225,16 +260,9 @@ impl App {
         if passkeys.is_empty() {
             return Err(ApiError::Conflict("no passkey is registered yet".into()));
         }
-        let (challenge, state) = self
-            .auth
-            .webauthn
-            .start_passkey_authentication(&passkeys)
-            .map_err(|e| ApiError::Internal(anyhow::anyhow!("{e}")))?;
-        let id = random_token();
-        let mut logins = self.auth.logins.lock().await;
-        let t = now();
-        logins.retain(|_, l| l.expires_at > t);
-        logins.insert(id.clone(), Login { state, expires_at: t + CHALLENGE_TTL });
+        let (challenge, state) =
+            self.auth.webauthn.start_passkey_authentication(&passkeys).map_err(internal)?;
+        let id = self.store_ceremony(None, serde_json::to_value(&state).map_err(internal)?).await?;
         let jar =
             jar.add(cookie(CHALLENGE_COOKIE, id, CHALLENGE_TTL, self.settings.secure_cookies()));
         Ok((jar, challenge))
@@ -245,19 +273,16 @@ impl App {
         jar: CookieJar,
         credential: &PublicKeyCredential,
     ) -> ApiResult<CookieJar> {
-        let id = challenge_id(&jar)?;
-        let login = self
-            .auth
-            .logins
-            .lock()
-            .await
-            .remove(&id)
-            .filter(|l| l.expires_at > now())
-            .ok_or_else(|| ApiError::bad_request("passkey ceremony expired, try again"))?;
+        let ceremony = self.take_ceremony(&jar).await?;
+        if ceremony.registration.is_some() {
+            return Err(ApiError::bad_request("passkey ceremony expired, try again"));
+        }
+        let state: PasskeyAuthentication =
+            serde_json::from_value(ceremony.state).map_err(internal)?;
         let result = self
             .auth
             .webauthn
-            .finish_passkey_authentication(credential, &login.state)
+            .finish_passkey_authentication(credential, &state)
             .map_err(webauthn_error)?;
         let name = self
             .db
@@ -273,7 +298,7 @@ impl App {
             })
             .await?;
         tracing::info!(passkey = %name, "signed in");
-        let token = self.auth.new_session(self.settings.session_hours).await;
+        let token = self.new_session(self.settings.session_hours).await?;
         Ok(jar.remove(Cookie::build(CHALLENGE_COOKIE).path("/")).add(self.session_cookie(token)))
     }
 

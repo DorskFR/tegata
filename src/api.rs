@@ -78,8 +78,10 @@ pub async fn login_finish(
 }
 
 pub async fn logout(State(app): State<AppState>, jar: CookieJar) -> impl IntoResponse {
-    if let Some(c) = jar.get(SESSION_COOKIE) {
-        app.auth.end_session(c.value()).await;
+    if let Some(c) = jar.get(SESSION_COOKIE)
+        && let Err(err) = app.end_session(c.value()).await
+    {
+        tracing::warn!(error = ?err, "ending a session failed");
     }
     (
         jar.remove(axum_extra::extract::cookie::Cookie::build(SESSION_COOKIE).path("/")),

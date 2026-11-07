@@ -36,7 +36,7 @@ async fn harness() -> Harness {
         "setup",
     ]);
     let app: Arc<App> = Arc::new(cli.build().await.unwrap());
-    let session = app.auth.open_session(1).await;
+    let session = app.open_session(1).await.unwrap();
     Harness { app, dir, cookie: format!("tegata_session={session}") }
 }
 
@@ -284,7 +284,14 @@ async fn sweeper_revokes_lost_enrollments() {
     let h = harness().await;
     let (_, created) = h.json("POST", "/api/devices", Some(json!({"name": "laptop"}))).await;
     let serial = created["device"]["cert"]["serial"].as_str().unwrap().to_owned();
-    h.app.enrollments.take(&token_of(&created), tegata::util::now()).await.unwrap();
+    h.app
+        .db
+        .update(|s| {
+            s.enrollments.clear();
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
+        .unwrap();
     h.app.sweep().await.unwrap();
     let (_, devices) = h.json("GET", "/api/devices", None).await;
     assert_eq!(devices[0]["status"], "revoked");
@@ -419,7 +426,7 @@ async fn unknown_certificates_only_reach_open_apps() {
         "--authz-allow-unknown",
     ]);
     let app: Arc<App> = Arc::new(cli.build().await.unwrap());
-    let session = app.auth.open_session(1).await;
+    let session = app.open_session(1).await.unwrap();
     let h = Harness { app, dir, cookie: format!("tegata_session={session}") };
     assert_eq!(h.authz_host("open.example.com", "00aa").await, StatusCode::OK);
     h.app.flush_seen().await.unwrap();
@@ -432,4 +439,85 @@ async fn unknown_certificates_only_reach_open_apps() {
     .await;
     assert_eq!(h.authz_host("locked.example.com", "00aa").await, StatusCode::FORBIDDEN);
     assert_eq!(h.authz_host("open.example.com", "00aa").await, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn replicas_share_sessions_links_and_rules() {
+    let dir = std::env::temp_dir().join(format!("tegata-replicas-{}", uuid::Uuid::new_v4()));
+    let store: Arc<dyn tegata::store::Store> = Arc::new(tegata::store::MemoryStore::default());
+    store.save(&tegata::model::State::default(), Some(0)).await.unwrap();
+    let replica = || async {
+        let cli = <Cli as clap::Parser>::parse_from([
+            "tegata",
+            "--public-url",
+            ORIGIN,
+            "--backend",
+            "memory",
+            "--data-dir",
+            dir.to_str().unwrap(),
+            "--setup-token",
+            "setup",
+        ]);
+        let app: Arc<App> = Arc::new(cli.build_with_store(Some(store.clone())).await.unwrap());
+        app
+    };
+    let a = replica().await;
+    let b = replica().await;
+    let session = a.open_session(1).await.unwrap();
+    let ha =
+        Harness { app: a.clone(), dir: dir.clone(), cookie: format!("tegata_session={session}") };
+    let hb =
+        Harness { app: b.clone(), dir: dir.clone(), cookie: format!("tegata_session={session}") };
+
+    let (status, _) = hb.json("GET", "/api/devices", None).await;
+    assert_eq!(status, StatusCode::OK, "a session opened on one replica works on the other");
+
+    let (status, created) = ha.json("POST", "/api/devices", Some(json!({"name": "phone"}))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let token = token_of(&created);
+    let (status, info) = hb.json("GET", &format!("/api/enroll/{token}"), None).await;
+    assert_eq!(status, StatusCode::OK, "a link created on one replica is visible on the other");
+    assert_eq!(info["device_name"], "phone");
+
+    let (status, _, _) = hb.call("GET", &format!("/enroll/{token}/device.p12"), None, false).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = ha.call("GET", &format!("/enroll/{token}/device.p12"), None, false).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "the other replica cannot hand the link out again");
+
+    a.db.refresh().await.unwrap();
+    let (_, devices) = ha.json("GET", "/api/devices", None).await;
+    assert_eq!(devices[0]["status"], "active", "the download on one replica shows on the other");
+    let fp = devices[0]["cert"]["fingerprint_sha256"].as_str().unwrap().to_owned();
+    assert_eq!(hb.authz(&fp).await, StatusCode::OK);
+
+    let id = devices[0]["id"].as_str().unwrap();
+    let (status, _) = ha.json("POST", &format!("/api/devices/{id}/revoke"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    b.db.refresh().await.unwrap();
+    assert_eq!(
+        hb.authz(&fp).await,
+        StatusCode::FORBIDDEN,
+        "a revocation on one replica holds on the other"
+    );
+
+    let (status, _, _) = ha.call("POST", "/api/auth/logout", None, true).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    b.db.refresh().await.unwrap();
+    let (status, _) = hb.json("GET", "/api/devices", None).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "logging out on one replica ends the session on both"
+    );
+
+    let (status, start) = ha
+        .json(
+            "POST",
+            "/api/auth/register/start",
+            Some(json!({"name": "key", "setup_token": "setup"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{start}");
+    b.db.refresh().await.unwrap();
+    assert_eq!(b.db.read().await.ceremonies.len(), 1, "passkey ceremonies are shared too");
 }

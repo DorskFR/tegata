@@ -111,6 +111,11 @@ impl Cli {
     }
 
     pub async fn build(self) -> anyhow::Result<App> {
+        self.build_with_store(None).await
+    }
+
+    /// `shared` replaces the backend's own state store; replicas in tests share one.
+    pub async fn build_with_store(self, shared: Option<Arc<dyn Store>>) -> anyhow::Result<App> {
         let (store, ca): (Arc<dyn Store>, Arc<dyn Ca>) = match self.backend {
             Backend::Local => (
                 Arc::new(FileStore::new(self.data_dir.join("state.json"))),
@@ -139,6 +144,7 @@ impl Cli {
                 )
             }
         };
+        let store = shared.unwrap_or(store);
         let trust = self
             .trust_configmap
             .as_deref()
