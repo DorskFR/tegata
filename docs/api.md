@@ -71,6 +71,7 @@ type Device = {
   rotation: Cert | null;    // a replacement waiting to be installed
   history: Cert[];          // older certs, newest first
   last_seen: { at: string; ip: string | null; user_agent: string | null } | null;
+  stale: boolean;           // in use, but not seen for `stale_days` (since install if never)
 };
 type Created = {
   device: Device;
@@ -79,6 +80,7 @@ type Created = {
 type Config = {
   validity_days: { default: number; max: number; presets: number[] };
   expiring_days: number;
+  stale_days: number;       // 0 when the stale flag is off
   enrollment_minutes: number;
   ca_subject: string;
   ca_not_after: string;     // the longest preset ends here

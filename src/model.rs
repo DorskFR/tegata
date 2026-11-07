@@ -171,6 +171,8 @@ pub struct DeviceView {
     pub rotation: Option<CertView>,
     pub history: Vec<CertView>,
     pub last_seen: Option<Seen>,
+    /// In use but not seen for the configured number of days.
+    pub stale: bool,
 }
 
 impl CertView {
@@ -237,7 +239,24 @@ impl DeviceView {
                 .map(|c| CertView::new(c, now))
                 .collect(),
             last_seen: device.last_seen.clone(),
+            stale: false,
         }
+    }
+
+    /// Marks a device in use whose latest sign of life (last seen, else install) is
+    /// older than `stale_after`.
+    #[must_use]
+    pub fn with_staleness(
+        mut self,
+        device: &Device,
+        now: OffsetDateTime,
+        stale_after: Duration,
+    ) -> Self {
+        let in_use = matches!(self.status, DeviceStatus::Active | DeviceStatus::Expiring);
+        let installed = device.active_cert(now).and_then(|c| c.enrolled_at);
+        let last = device.last_seen.as_ref().map(|s| s.at).or(installed);
+        self.stale = in_use && last.is_some_and(|t| now - t > stale_after);
+        self
     }
 }
 
@@ -270,6 +289,26 @@ mod tests {
             certs,
             last_seen: None,
         }
+    }
+
+    #[test]
+    fn staleness() {
+        let now = datetime!(2030-03-01 0:00 UTC);
+        let after = Duration::days(30);
+        let mut c = cert("01", 365);
+        c.enrolled_at = Some(datetime!(2030-01-01 0:00 UTC));
+        let mut d = device(vec![c]);
+        let view =
+            |d: &Device| DeviceView::new(d, now, Duration::days(14)).with_staleness(d, now, after);
+        assert!(view(&d).stale, "installed two months ago and never seen");
+        d.last_seen = Some(Seen { at: now - Duration::days(3), ip: None, user_agent: None });
+        assert!(!view(&d).stale);
+        d.last_seen = Some(Seen { at: now - Duration::days(31), ip: None, user_agent: None });
+        assert!(view(&d).stale);
+        d.certs[0].revoked_at = Some(now);
+        assert!(!view(&d).stale, "revoked devices are not stale, they are gone");
+        let fresh = device(vec![cert("02", 365)]);
+        assert!(!view(&fresh).stale, "pending devices are not stale");
     }
 
     #[test]

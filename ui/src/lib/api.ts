@@ -25,12 +25,14 @@ export type Device = {
 	rotation: Cert | null;
 	history: Cert[];
 	last_seen: LastSeen | null;
+	stale: boolean;
 };
 export type Enrollment = { url: string; password: string; expires_at: string };
 export type Created = { device: Device; enrollment: Enrollment };
 export type Config = {
 	validity_days: { default: number; max: number; presets: number[] };
 	expiring_days: number;
+	stale_days: number;
 	enrollment_minutes: number;
 	ca_subject: string;
 	ca_not_after: string;

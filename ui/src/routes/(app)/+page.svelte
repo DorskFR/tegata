@@ -247,6 +247,16 @@
 						{:else}
 							<Text size="sm" tone="faint">never</Text>
 						{/if}
+						{#if d.stale}
+							<Badge
+								tone="warn"
+								size="sm"
+								title="In use but no traffic for {config?.stale_days ??
+									'many'} days: revoke it if the device is gone"
+							>
+								not seen for {config?.stale_days ?? 'many'}+ days
+							</Badge>
+						{/if}
 					</div>
 					<div class="cell fp">
 						<span class="label">Fingerprint</span>
