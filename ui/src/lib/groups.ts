@@ -1,3 +1,5 @@
+import { avatarHue } from '@dorsk/tsumikit';
+
 export const GROUP_PATTERN = /^[a-z0-9_-]+$/;
 export const GROUP_HINT = 'Lowercase letters, digits, - and _.';
 
@@ -26,4 +28,9 @@ export function addGroups(
 	const merged = [...current];
 	for (const g of parsed.groups) if (!merged.includes(g)) merged.push(g);
 	return { groups: merged.sort(), invalid: parsed.invalid };
+}
+
+/** A stable colour per group name that follows the theme. */
+export function groupColor(group: string): string {
+	return `hsl(${avatarHue(group)} var(--mach-fg-sl))`;
 }

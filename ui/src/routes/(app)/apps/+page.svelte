@@ -3,6 +3,7 @@
 		Badge,
 		Button,
 		Callout,
+		Checkbox,
 		ConfirmModal,
 		EmptyState,
 		Field,
@@ -15,15 +16,23 @@
 	} from '@dorsk/tsumikit';
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
-	import { ApiError, api, type App, type AppAccess } from '#lib/api';
+	import { ApiError, api, type App, type AppAccess, type Config } from '#lib/api';
 	import AppAccessDialog from '#lib/components/AppAccessDialog.svelte';
+	import GroupBadge from '#lib/components/GroupBadge.svelte';
+	import LockoutConfirm from '#lib/components/LockoutConfirm.svelte';
 	import { normalizeHost } from '#lib/hosts';
 
 	let apps = $state<App[] | null>(null);
 	let loadError = $state('');
+	let config = $state<Config | null>(null);
+	let selected = $state<string[]>([]);
 	let accessOpen = $state(false);
-	let accessApp = $state<App | null>(null);
+	let accessApps = $state<App[]>([]);
 	let accessBusy = $state(false);
+	let lockout = $state<{ message: string; apply: () => Promise<void> } | null>(null);
+
+	const thisDevice = $derived(config?.this_device ?? null);
+	const allSelected = $derived(apps !== null && apps.length > 0 && selected.length === apps.length);
 	let addOpen = $state(false);
 	let addHost = $state('');
 	let addError = $state('');
@@ -34,6 +43,8 @@
 	async function refresh() {
 		try {
 			apps = await api.apps.list();
+			const hosts = new Set(apps.map((a) => a.host));
+			selected = selected.filter((h) => hosts.has(h));
 			loadError = '';
 		} catch (e) {
 			if (e instanceof ApiError && e.status === 401) {
@@ -45,19 +56,38 @@
 	}
 	$effect(() => {
 		refresh();
+		api.config().then(
+			(c) => (config = c),
+			() => (config = null)
+		);
 	});
 
-	function openAccess(app: App) {
-		accessApp = app;
+	function toggle(host: string, on: boolean) {
+		selected = on ? [...selected, host] : selected.filter((h) => h !== host);
+	}
+	function toggleAll(on: boolean) {
+		selected = on && apps ? apps.map((a) => a.host) : [];
+	}
+
+	function openAccess(list: App[]) {
+		accessApps = list;
 		accessOpen = true;
 	}
 	async function submitAccess(access: AppAccess) {
-		if (!accessApp) return;
+		const hosts = accessApps.map((a) => a.host);
+		const what = hosts.length === 1 ? hosts[0] : `${hosts.length} apps`;
+		const save = async (confirmed: boolean) => {
+			await api.apps.updateMany(hosts, access, confirmed);
+			toasts.ok(access.restricted ? `Restricted ${what}` : `Opened ${what}`);
+			if (hosts.length > 1) selected = [];
+			await refresh();
+		};
 		accessBusy = true;
 		try {
-			await api.apps.update(accessApp.host, access);
-			toasts.ok(access.restricted ? `Restricted ${accessApp.host}` : `Opened ${accessApp.host}`);
-			await refresh();
+			await save(false);
+		} catch (e) {
+			if (!(e instanceof ApiError && e.lockout)) throw e;
+			lockout = { message: e.message, apply: () => save(true) };
 		} finally {
 			accessBusy = false;
 		}
@@ -125,6 +155,24 @@
 		issued by tegata never pass restricted apps.
 	</Callout>
 
+	{#if thisDevice && thisDevice.name === null}
+		<Callout tone="warn" icon="alert" title="This browser is not using a tegata certificate">
+			The certificate it presents was not issued by tegata, so restricted apps refuse it. Install
+			this device's own certificate and remove the old one before restricting {config?.own_host ??
+				'tegata'}.
+		</Callout>
+	{:else if thisDevice}
+		<p class="this-device">
+			<Text size="sm" tone="muted">You are on</Text>
+			<Text size="sm" weight="medium">{thisDevice.name}</Text>
+			{#each thisDevice.groups as g (g)}
+				<GroupBadge group={g} size="xs" />
+			{:else}
+				<Text size="sm" tone="faint">(no groups)</Text>
+			{/each}
+		</p>
+	{/if}
+
 	{#if loadError}
 		<EmptyState
 			tone="danger"
@@ -143,9 +191,37 @@
 			onAction={openAdd}
 		/>
 	{:else}
+		<div class="bulk" class:active={selected.length > 0}>
+			<Checkbox
+				checked={allSelected}
+				indeterminate={selected.length > 0 && !allSelected}
+				label={selected.length ? `${selected.length} selected` : 'Select all'}
+				onchange={(e) => toggleAll(e.currentTarget.checked)}
+			/>
+			{#if selected.length}
+				<div class="bulk-actions">
+					<Button
+						size="sm"
+						variant="primary"
+						onclick={() => openAccess(apps?.filter((a) => selected.includes(a.host)) ?? [])}
+					>
+						Edit access
+					</Button>
+					<Button size="sm" variant="ghost" onclick={() => (selected = [])}>Clear</Button>
+				</div>
+			{/if}
+		</div>
 		<ul class="apps">
 			{#each apps as app (app.host)}
-				<li class="app">
+				<li class="app" class:selected={selected.includes(app.host)}>
+					<div class="cell select">
+						<Checkbox
+							checked={selected.includes(app.host)}
+							label={`Select ${app.host}`}
+							labelHidden
+							onchange={(e) => toggle(app.host, e.currentTarget.checked)}
+						/>
+					</div>
 					<div class="cell host">
 						<Text weight="medium" mono truncate>{app.host}</Text>
 						<Text size="sm" tone="muted">
@@ -167,7 +243,7 @@
 								<Badge tone="warn" size="sm" icon="lock">Restricted to</Badge>
 								<ul class="groups" aria-label="Allowed groups">
 									{#each app.groups as g (g)}
-										<li><Badge tone="accent" size="sm">{g}</Badge></li>
+										<li><GroupBadge group={g} /></li>
 									{/each}
 								</ul>
 							</span>
@@ -176,7 +252,7 @@
 						{/if}
 					</div>
 					<div class="cell actions">
-						<Button size="sm" variant="ghost" onclick={() => openAccess(app)}>Edit access</Button>
+						<Button size="sm" variant="ghost" onclick={() => openAccess([app])}>Edit access</Button>
 						<Button size="sm" variant="ghost" hoverDanger onclick={() => (removing = app)}>
 							Remove
 						</Button>
@@ -187,7 +263,14 @@
 	{/if}
 </div>
 
-<AppAccessDialog bind:open={accessOpen} app={accessApp} busy={accessBusy} onsubmit={submitAccess} />
+<AppAccessDialog
+	bind:open={accessOpen}
+	apps={accessApps}
+	busy={accessBusy}
+	onsubmit={submitAccess}
+/>
+
+<LockoutConfirm bind:pending={lockout} />
 
 <Modal title="Add app" bind:open={addOpen} busy={addBusy} size="sm">
 	{#snippet body()}
@@ -250,10 +333,35 @@
 		flex-direction: column;
 		gap: var(--sp-3);
 	}
+	.this-device {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: var(--sp-1);
+		margin: 0;
+	}
+	.bulk {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--sp-3);
+		min-height: 2.25rem;
+		padding: 0 var(--sp-4);
+	}
+	.bulk-actions {
+		display: flex;
+		gap: var(--sp-1);
+	}
+	.app.selected {
+		border-color: var(--accent);
+	}
+	.select {
+		grid-area: select;
+	}
 	.app {
 		display: grid;
-		grid-template-columns: minmax(0, 1.2fr) minmax(0, 2fr) auto;
-		grid-template-areas: 'host access actions';
+		grid-template-columns: auto minmax(0, 1.2fr) minmax(0, 2fr) auto;
+		grid-template-areas: 'select host access actions';
 		align-items: center;
 		gap: var(--sp-3) var(--sp-4);
 		padding: var(--sp-3) var(--sp-4);
@@ -302,11 +410,11 @@
 	}
 	@media (max-width: 48rem) {
 		.app {
-			grid-template-columns: minmax(0, 1fr);
+			grid-template-columns: auto minmax(0, 1fr);
 			grid-template-areas:
-				'host'
-				'access'
-				'actions';
+				'select host'
+				'. access'
+				'. actions';
 			align-items: start;
 		}
 		.actions {

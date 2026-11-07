@@ -15,7 +15,9 @@
 	import { ApiError, api, type Config, type Created, type Device } from '#lib/api';
 	import DeviceDialog from '#lib/components/DeviceDialog.svelte';
 	import EnrollmentPanel from '#lib/components/EnrollmentPanel.svelte';
+	import GroupBadge from '#lib/components/GroupBadge.svelte';
 	import GroupsDialog from '#lib/components/GroupsDialog.svelte';
+	import LockoutConfirm from '#lib/components/LockoutConfirm.svelte';
 	import StatusBadge from '#lib/components/StatusBadge.svelte';
 	import { formatDate, relativeTime, shortFingerprint } from '#lib/format';
 
@@ -80,13 +82,22 @@
 		groupsOpen = true;
 	}
 
+	let lockout = $state<{ message: string; apply: () => Promise<void> } | null>(null);
+
 	async function submitGroups(groups: string[]) {
-		if (!groupsDevice) return;
+		const device = groupsDevice;
+		if (!device) return;
+		const save = async (confirmed: boolean) => {
+			await api.devices.setGroups(device.id, groups, confirmed);
+			toasts.ok(`Updated groups of ${device.name}`);
+			await refresh();
+		};
 		groupsBusy = true;
 		try {
-			await api.devices.setGroups(groupsDevice.id, groups);
-			toasts.ok(`Updated groups of ${groupsDevice.name}`);
-			await refresh();
+			await save(false);
+		} catch (e) {
+			if (!(e instanceof ApiError && e.lockout)) throw e;
+			lockout = { message: e.message, apply: () => save(true) };
 		} finally {
 			groupsBusy = false;
 		}
@@ -214,7 +225,7 @@
 						{#if d.groups.length}
 							<ul class="groups" aria-label="Groups">
 								{#each d.groups as g (g)}
-									<li><Badge tone="accent" size="xs">{g}</Badge></li>
+									<li><GroupBadge group={g} size="xs" /></li>
 								{/each}
 							</ul>
 						{/if}
@@ -329,6 +340,8 @@
 	busy={groupsBusy}
 	onsubmit={submitGroups}
 />
+
+<LockoutConfirm bind:pending={lockout} />
 
 <ConfirmModal
 	open={confirm !== null}

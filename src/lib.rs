@@ -44,7 +44,7 @@ pub fn router(app: AppState) -> Router {
         .route("/devices", get(api::devices).post(api::create_device))
         .route("/devices/{id}", delete(api::delete_device).patch(api::patch_device))
         .route("/groups", get(api::groups))
-        .route("/apps", get(api::apps).post(api::add_app))
+        .route("/apps", get(api::apps).post(api::add_app).put(api::set_app_rules))
         .route("/apps/{host}", put(api::set_app_rule).delete(api::remove_app))
         .route("/devices/{id}/rotate", post(api::rotate))
         .route("/devices/{id}/enrollment", post(api::new_enrollment))

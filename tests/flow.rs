@@ -48,7 +48,21 @@ impl Harness {
         body: Option<Value>,
         auth: bool,
     ) -> (StatusCode, Vec<u8>, header::HeaderMap) {
+        self.call_from(None, method, uri, body, auth).await
+    }
+
+    async fn call_from(
+        &self,
+        fingerprint: Option<&str>,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        auth: bool,
+    ) -> (StatusCode, Vec<u8>, header::HeaderMap) {
         let mut req = Request::builder().method(method).uri(uri).header(header::ORIGIN, ORIGIN);
+        if let Some(fp) = fingerprint {
+            req = req.header("x-forwarded-client-cert", format!("Hash={fp};Subject=\"CN=x\""));
+        }
         if auth {
             req = req.header(header::COOKIE, &self.cookie);
         }
@@ -68,6 +82,17 @@ impl Harness {
 
     async fn json(&self, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
         let (status, bytes, _) = self.call(method, uri, body, true).await;
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    async fn json_from(
+        &self,
+        fingerprint: &str,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, Value) {
+        let (status, bytes, _) = self.call_from(Some(fingerprint), method, uri, body, true).await;
         (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
     }
 
@@ -409,6 +434,85 @@ async fn app_rules() {
     assert_eq!(status, StatusCode::NO_CONTENT);
     let (status, _) =
         h.json("PATCH", &format!("/api/devices/{id}"), Some(json!({"groups": ["a b"]}))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn admins_cannot_lock_themselves_out() {
+    let h = harness().await;
+    let laptop = installed(&h, "laptop", &["admin"]).await;
+    let tablet = installed(&h, "tablet", &["family"]).await;
+    let foreign = "00aa";
+    for host in ["tegata.test", "nas.example.com"] {
+        h.json("POST", "/api/apps", Some(json!({"host": host}))).await;
+    }
+    let both = json!({"hosts": ["tegata.test", "nas.example.com"], "restricted": true, "groups": ["admin"]});
+
+    let (status, err) = h.json_from(&tablet, "PUT", "/api/apps", Some(both.clone())).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{err}");
+    assert_eq!(err["lockout"], true);
+    assert!(err["error"].as_str().unwrap().contains("tablet"), "{err}");
+    let (_, apps) = h.json("GET", "/api/apps", None).await;
+    assert!(apps.as_array().unwrap().iter().all(|a| a["restricted"] == false), "nothing changed");
+
+    let (status, err) = h.json_from(foreign, "PUT", "/api/apps", Some(both.clone())).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{err}");
+    assert!(err["error"].as_str().unwrap().contains("did not issue"), "{err}");
+
+    let (status, rules) = h.json_from(&laptop, "PUT", "/api/apps", Some(both.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{rules}");
+    assert_eq!(rules.as_array().unwrap().len(), 2);
+    assert_eq!(h.authz_host("nas.example.com", &tablet).await, StatusCode::FORBIDDEN);
+
+    let (_, devices) = h.json("GET", "/api/devices", None).await;
+    let id = devices.as_array().unwrap().iter().find(|d| d["name"] == "laptop").unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let uri = format!("/api/devices/{id}");
+    let (status, err) = h.json_from(&laptop, "PATCH", &uri, Some(json!({"groups": []}))).await;
+    assert_eq!(status, StatusCode::CONFLICT, "dropping your own group warns");
+    assert_eq!(err["lockout"], true);
+    let (status, _) = h
+        .json_from(&tablet, "PUT", "/api/apps/nas.example.com", Some(json!({"restricted": false})))
+        .await;
+    assert_eq!(status, StatusCode::OK, "other apps are not guarded");
+    let (status, _) =
+        h.json("PUT", "/api/apps/tegata.test", Some(json!({"restricted": false}))).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = h
+        .json(
+            "PUT",
+            "/api/apps",
+            Some(json!({"hosts": ["tegata.test"], "restricted": true, "groups": ["x"]})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "no certificate to protect without a gateway");
+
+    let mut confirmed = both;
+    confirmed["confirm_lockout"] = json!(true);
+    let (status, _) = h.json_from(&tablet, "PUT", "/api/apps", Some(confirmed)).await;
+    assert_eq!(status, StatusCode::OK, "a confirmed lockout goes through");
+    assert_eq!(h.authz_host("tegata.test", &tablet).await, StatusCode::FORBIDDEN);
+
+    let (_, config) = h.json_from(&laptop, "GET", "/api/config", None).await;
+    assert_eq!(config["own_host"], "tegata.test");
+    assert_eq!(config["this_device"], json!({"name": "laptop", "groups": ["admin"]}));
+    let (_, config) = h.json_from(foreign, "GET", "/api/config", None).await;
+    assert_eq!(config["this_device"], json!({"name": null}));
+
+    let (status, _) = h
+        .json_from(
+            &laptop,
+            "PUT",
+            "/api/apps",
+            Some(json!({"hosts": ["nope.example.com"], "restricted": false})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = h
+        .json_from(&laptop, "PUT", "/api/apps", Some(json!({"hosts": [], "restricted": false})))
+        .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 

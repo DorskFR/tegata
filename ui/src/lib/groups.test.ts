@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { addGroups, normalizeGroup, parseGroups } from './groups';
+import { addGroups, groupColor, normalizeGroup, parseGroups } from './groups';
 
 describe('normalizeGroup', () => {
 	it('lowercases and trims', () => {
@@ -39,5 +39,13 @@ describe('addGroups', () => {
 		const current = ['b'];
 		addGroups(current, 'a');
 		expect(current).toEqual(['b']);
+	});
+});
+
+describe('groupColor', () => {
+	it('is stable per name and differs between names', () => {
+		expect(groupColor('admin')).toBe(groupColor('admin'));
+		expect(groupColor('admin')).not.toBe(groupColor('family'));
+		expect(groupColor('admin')).toMatch(/^hsl\(\d+ var\(--mach-fg-sl\)\)$/);
 	});
 });

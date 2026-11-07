@@ -11,6 +11,7 @@ use webauthn_rs::prelude::{PublicKeyCredential, RegisterPublicKeyCredential};
 use crate::app::{AppState, Download};
 use crate::auth::{Admin, SESSION_COOKIE, is_signed_in};
 use crate::error::{ApiError, ApiResult};
+use crate::rules::{Caller, CallerDevice, caller_device};
 
 pub async fn session(State(app): State<AppState>, jar: CookieJar) -> Json<Value> {
     let setup_required = app.db.read().await.passkeys.is_empty();
@@ -21,9 +22,17 @@ pub async fn session(State(app): State<AppState>, jar: CookieJar) -> Json<Value>
     }))
 }
 
-pub async fn config(State(app): State<AppState>, _: Admin) -> Json<Value> {
+pub async fn config(State(app): State<AppState>, _: Admin, caller: Caller) -> Json<Value> {
     let s = &app.settings;
+    let state = app.db.read().await;
+    let this_device = match caller_device(&state, &caller) {
+        CallerDevice::Unidentified => Value::Null,
+        CallerDevice::Foreign => json!({ "name": null }),
+        CallerDevice::Device { name, groups } => json!({ "name": name, "groups": groups }),
+    };
     Json(json!({
+        "own_host": app.own_host(),
+        "this_device": this_device,
         "validity_days": {
             "default": s.default_validity_days,
             "max": s.max_validity_days,
@@ -241,15 +250,18 @@ pub async fn crl_pem(State(app): State<AppState>) -> ApiResult<Response> {
 #[derive(Deserialize)]
 pub struct DevicePatch {
     groups: Vec<String>,
+    #[serde(default)]
+    confirm_lockout: bool,
 }
 
 pub async fn patch_device(
     State(app): State<AppState>,
     _: Admin,
+    caller: Caller,
     Path(id): Path<Uuid>,
     Json(body): Json<DevicePatch>,
 ) -> ApiResult<impl IntoResponse> {
-    Ok(Json(app.set_device_groups(id, &body.groups).await?))
+    Ok(Json(app.set_device_groups(&caller, body.confirm_lockout, id, &body.groups).await?))
 }
 
 pub async fn groups(State(app): State<AppState>, _: Admin) -> impl IntoResponse {
@@ -278,15 +290,49 @@ pub struct AppRuleBody {
     restricted: bool,
     #[serde(default)]
     groups: Vec<String>,
+    #[serde(default)]
+    confirm_lockout: bool,
 }
 
 pub async fn set_app_rule(
     State(app): State<AppState>,
     _: Admin,
+    caller: Caller,
     Path(host): Path<String>,
     Json(body): Json<AppRuleBody>,
 ) -> ApiResult<impl IntoResponse> {
-    Ok(Json(app.set_app_rule(&host, body.restricted, &body.groups).await?))
+    Ok(Json(
+        app.set_app_rule(&caller, body.confirm_lockout, &host, body.restricted, &body.groups)
+            .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct AppRulesBody {
+    hosts: Vec<String>,
+    restricted: bool,
+    #[serde(default)]
+    groups: Vec<String>,
+    #[serde(default)]
+    confirm_lockout: bool,
+}
+
+pub async fn set_app_rules(
+    State(app): State<AppState>,
+    _: Admin,
+    caller: Caller,
+    Json(body): Json<AppRulesBody>,
+) -> ApiResult<impl IntoResponse> {
+    Ok(Json(
+        app.set_app_rules(
+            &caller,
+            body.confirm_lockout,
+            &body.hosts,
+            body.restricted,
+            &body.groups,
+        )
+        .await?,
+    ))
 }
 
 pub async fn remove_app(

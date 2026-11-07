@@ -39,7 +39,7 @@ type Passkey = { id: string; name: string; created_at: string; last_used_at: str
 |---|---|---|---|
 | GET | `/api/devices` | | `Device[]` |
 | POST | `/api/devices` | `{ "name": string, "owner": string, "groups"?: string[], "validity_days": number }` | `Created` |
-| PATCH | `/api/devices/{id}` | `{ "groups": string[] }` | `Device` |
+| PATCH | `/api/devices/{id}` | `{ "groups": string[], "confirm_lockout"?: boolean }` | `Device` |
 | POST | `/api/devices/{id}/rotate` | `{ "validity_days"?: number }` | `Created` |
 | POST | `/api/devices/{id}/enrollment` | | `Created` (new link + password for a still-pending cert) |
 | POST | `/api/devices/{id}/revoke` | | `Device` |
@@ -84,6 +84,10 @@ type Config = {
   enrollment_minutes: number;
   ca_subject: string;
   ca_not_after: string;     // the longest preset ends here
+  own_host: string | null;  // tegata's own hostname, from the public URL
+  // The certificate behind this request: null without a gateway, name null when tegata
+  // did not issue it.
+  this_device: { name: string; groups: string[] } | { name: null } | null;
 };
 ```
 
@@ -101,9 +105,15 @@ did not issue (allowed with `TEGATA_AUTHZ_ALLOW_UNKNOWN`) only pass open apps.
 |---|---|---|---|
 | GET | `/api/apps` | | `App[]`, sorted by host |
 | POST | `/api/apps` | `{ "host": string }` | `201 App` |
-| PUT | `/api/apps/{host}` | `{ "restricted": boolean, "groups": string[] }` | `App` (restricted needs a group) |
+| PUT | `/api/apps` | `{ "hosts": string[], "restricted": boolean, "groups": string[], "confirm_lockout"?: boolean }` | `App[]`, every host changed in one write |
+| PUT | `/api/apps/{host}` | `{ "restricted": boolean, "groups": string[], "confirm_lockout"?: boolean }` | `App` (restricted needs a group) |
 | DELETE | `/api/apps/{host}` | | `204` (comes back if traffic continues) |
 | GET | `/api/groups` | | `string[]`, every group used by a device or an app |
+
+tegata identifies the caller's certificate from the gateway's `x-forwarded-client-cert`.
+A change to an app rule or to a device's groups that would newly stop that certificate
+from reaching tegata's own host answers `409 { "error": string, "lockout": true }` and
+changes nothing; resend it with `"confirm_lockout": true` to apply it anyway.
 
 ```ts
 type App = {
