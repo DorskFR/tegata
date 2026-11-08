@@ -6,11 +6,8 @@ Web UI that mints, installs, rotates and revokes mTLS client certificates for de
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/devices-dark.png">
-  <img alt="tegata device list: six fake devices with their owner, groups, status (pending, active, rotation waiting, revoked, expiring), expiry, last seen address and certificate fingerprint" src="docs/assets/devices-light.png" width="900">
+  <img alt="tegata device list: six devices with their owner, groups, status (pending, active, rotation waiting, revoked, expiring), expiry, last seen address and certificate fingerprint" src="docs/assets/devices-light.png" width="900">
 </picture>
-
-^ one certificate per device. "rotation waiting": replacement issued, old certificate valid
-until the device downloads the new one.
 
 Runs a client CA (built in or OpenBao PKI), enrols devices by QR code and publishes the CA
 and CRL to the gateway.
@@ -29,7 +26,7 @@ and CRL to the gateway.
   <img alt="Enrollment panel for a new device: QR code, one-time link, password and a 30 minute countdown" src="docs/assets/enroll-light.png" width="900">
 </picture>
 
-^ the link only works with this password.
+The link only works with this password.
 
 ## Quick start
 
@@ -114,8 +111,6 @@ make lint          # rustfmt (nightly), clippy, svelte-check, prettier, eslint
 make run           # server on :8080, public URL http://localhost:5173
 make ui/dev        # in a second shell: Vite on :5173, proxying the API to :8080
 ```
-
-Screenshots: [docs/development.md](docs/development.md).
 
 ## License
 
