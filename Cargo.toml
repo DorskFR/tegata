@@ -4,7 +4,7 @@ version = "0.6.0"
 edition = "2024"
 rust-version = "1.94"
 license = "WTFPL"
-description = "Mint, install, rotate and revoke mTLS client certificates for your own devices."
+description = "Web UI that mints, installs, rotates and revokes mTLS client certificates for devices."
 readme = "README.md"
 
 [lints.rust]
