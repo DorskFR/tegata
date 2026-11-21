@@ -7,10 +7,23 @@ use crate::app::{AppState, AuthzDecision, DenyReason};
 /// The `Hash` (SHA-256 of the DER certificate) from the last element of an
 /// `x-forwarded-client-cert` header.
 pub fn xfcc_hash(header: &str) -> Option<String> {
+    xfcc_field(header, "hash")
+}
+
+/// The subject CN from the last element of an `x-forwarded-client-cert` header.
+pub fn xfcc_cn(header: &str) -> Option<String> {
+    let subject = xfcc_field(header, "subject")?;
+    subject.split(',').find_map(|rdn| {
+        let (key, value) = rdn.split_once('=')?;
+        key.trim().eq_ignore_ascii_case("cn").then(|| value.trim().to_owned())
+    })
+}
+
+fn xfcc_field(header: &str, name: &str) -> Option<String> {
     let element = split_outside_quotes(header, ',').into_iter().last()?;
     split_outside_quotes(element, ';').into_iter().find_map(|pair| {
         let (key, value) = pair.split_once('=')?;
-        key.trim().eq_ignore_ascii_case("hash").then(|| value.trim().trim_matches('"').to_owned())
+        key.trim().eq_ignore_ascii_case(name).then(|| value.trim().trim_matches('"').to_owned())
     })
 }
 
@@ -41,8 +54,8 @@ fn client_ip(headers: &HeaderMap) -> Option<String> {
 }
 
 pub async fn check(State(app): State<AppState>, headers: HeaderMap) -> Response {
-    let hash =
-        headers.get("x-forwarded-client-cert").and_then(|v| v.to_str().ok()).and_then(xfcc_hash);
+    let xfcc = headers.get("x-forwarded-client-cert").and_then(|v| v.to_str().ok());
+    let hash = xfcc.and_then(xfcc_hash);
     let user_agent = headers
         .get("user-agent")
         .and_then(|v| v.to_str().ok())
@@ -50,7 +63,19 @@ pub async fn check(State(app): State<AppState>, headers: HeaderMap) -> Response 
     let host = ["x-forwarded-host", "host"]
         .iter()
         .find_map(|name| headers.get(*name).and_then(|v| v.to_str().ok()));
-    match app.authorize(hash.as_deref(), host, client_ip(&headers), user_agent).await {
+    let ip = client_ip(&headers);
+    match app.authorize(hash.as_deref(), host, ip.clone(), user_agent.clone()).await {
+        AuthzDecision::AllowUnknown => {
+            tracing::info!(
+                fingerprint = hash.as_deref().unwrap_or_default(),
+                cn = ?xfcc.and_then(xfcc_cn),
+                ?host,
+                ?ip,
+                ?user_agent,
+                "allowed an unknown certificate"
+            );
+            StatusCode::OK.into_response()
+        }
         AuthzDecision::Allow { device } => {
             let mut resp = StatusCode::OK.into_response();
             if let Ok(value) = HeaderValue::from_str(&device)
@@ -127,6 +152,21 @@ mod tests {
         );
         assert_eq!(xfcc_hash(r#"Subject="CN=no hash""#), None);
         assert_eq!(xfcc_hash(""), None);
+    }
+
+    #[test]
+    fn parses_xfcc_cn() {
+        assert_eq!(
+            xfcc_cn(r#"Hash=ab;Subject="O=dorsk.dev,CN=artifact-uploader""#).as_deref(),
+            Some("artifact-uploader")
+        );
+        assert_eq!(
+            xfcc_cn(r#"By=x;Subject="CN=first",Hash=ab;Subject="C=JP,O=cyberia,CN=cyberia.dorsk.dev,emailAddress=a@b""#)
+                .as_deref(),
+            Some("cyberia.dorsk.dev")
+        );
+        assert_eq!(xfcc_cn("Hash=ab"), None);
+        assert_eq!(xfcc_cn(r#"Hash=ab;Subject="O=no cn""#), None);
     }
 
     #[tokio::test]

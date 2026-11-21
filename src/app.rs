@@ -82,6 +82,7 @@ pub enum Download {
 
 pub enum AuthzDecision {
     Allow { device: String },
+    AllowUnknown,
     Deny(DenyReason),
 }
 
@@ -490,7 +491,7 @@ impl App {
                 AuthzDecision::Deny(DenyReason::NoLongerValid { device: device.name.clone() })
             }
             None if self.settings.authz_allow_unknown && rule.is_none_or(|r| !r.restricted) => {
-                AuthzDecision::Allow { device: String::new() }
+                AuthzDecision::AllowUnknown
             }
             None => {
                 tracing::warn!(%fingerprint, ?ip, "rejected an unknown certificate");
