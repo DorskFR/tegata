@@ -13,6 +13,7 @@ use crate::ca::Ca;
 use crate::db::Db;
 use crate::enroll::{encode_p12, p12_bytes, token_hash};
 use crate::error::{ApiError, ApiResult};
+use crate::identities::Identities;
 use crate::kube::ConfigMapWriter;
 use crate::model::{
     AppRule, CertRecord, CertState, Device, DeviceView, EnrollmentRecord, Seen, State,
@@ -52,6 +53,7 @@ pub struct App {
     pub ca: Arc<dyn Ca>,
     pub auth: Auth,
     pub trust: Option<ConfigMapWriter>,
+    pub identities: Identities,
     seen: Mutex<HashMap<String, Seen>>,
     hosts_seen: Mutex<HashMap<String, OffsetDateTime>>,
     publish_lock: Mutex<()>,
@@ -116,6 +118,7 @@ impl App {
         ca: Arc<dyn Ca>,
         auth: Auth,
         trust: Option<ConfigMapWriter>,
+        identities: Identities,
     ) -> Self {
         Self {
             settings,
@@ -123,6 +126,7 @@ impl App {
             ca,
             auth,
             trust,
+            identities,
             seen: Mutex::new(HashMap::new()),
             hosts_seen: Mutex::new(HashMap::new()),
             publish_lock: Mutex::new(()),
@@ -490,10 +494,21 @@ impl App {
                 tracing::warn!(device = %device.name, serial = %cert.serial, ?ip, state = ?cert.state(t), "rejected a certificate that is no longer valid");
                 AuthzDecision::Deny(DenyReason::NoLongerValid { device: device.name.clone() })
             }
-            None if self.settings.authz_allow_unknown && rule.is_none_or(|r| !r.restricted) => {
-                AuthzDecision::AllowUnknown
-            }
             None => {
+                if let Some(identity) = self.identities.find(&fingerprint) {
+                    if identity.admits(host.as_deref(), rule.is_some_and(|r| r.restricted)) {
+                        tracing::debug!(identity = %identity.name, ?host, ?ip, "allowed a service identity");
+                        return AuthzDecision::Allow { device: identity.name };
+                    }
+                    tracing::info!(identity = %identity.name, ?host, ?ip, "service identity is not allowed on this app");
+                    return AuthzDecision::Deny(DenyReason::NotAllowed {
+                        device: identity.name,
+                        host: host.unwrap_or_default(),
+                    });
+                }
+                if self.settings.authz_allow_unknown && rule.is_none_or(|r| !r.restricted) {
+                    return AuthzDecision::AllowUnknown;
+                }
                 tracing::warn!(%fingerprint, ?ip, "rejected an unknown certificate");
                 AuthzDecision::Deny(DenyReason::Unknown)
             }

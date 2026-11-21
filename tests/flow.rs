@@ -625,3 +625,71 @@ async fn replicas_share_sessions_links_and_rules() {
     b.db.refresh().await.unwrap();
     assert_eq!(b.db.read().await.ceremonies.len(), 1, "passkey ceremonies are shared too");
 }
+
+#[tokio::test]
+async fn service_identities_are_known_without_allow_unknown() {
+    let dir = std::env::temp_dir().join(format!("tegata-identities-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("identities.json");
+    let (bot, uploader, stranger) = ("aa".repeat(32), "bb".repeat(32), "cc".repeat(32));
+    let write = |body: &str| std::fs::write(&file, body).unwrap();
+    write(&format!(
+        r#"[{{"name":"qa-bot","fingerprint_sha256":"{bot}","hosts":"unrestricted"}},
+           {{"name":"artifact-uploader","fingerprint_sha256":"{}","hosts":["artifact.example.com"]}}]"#,
+        uploader.to_ascii_uppercase()
+    ));
+    let cli = <Cli as clap::Parser>::parse_from([
+        "tegata",
+        "--public-url",
+        ORIGIN,
+        "--backend",
+        "memory",
+        "--data-dir",
+        dir.to_str().unwrap(),
+        "--service-identities",
+        file.to_str().unwrap(),
+    ]);
+    let app: Arc<App> = Arc::new(cli.build().await.unwrap());
+    let session = app.open_session(1).await.unwrap();
+    let h = Harness { app, dir, cookie: format!("tegata_session={session}") };
+
+    assert_eq!(h.authz_host("open.example.com", &bot).await, StatusCode::OK);
+    assert_eq!(h.authz_host("artifact.example.com", &bot).await, StatusCode::OK);
+    assert_eq!(h.authz_host("artifact.example.com", &uploader).await, StatusCode::OK);
+    assert_eq!(h.authz_host("open.example.com", &uploader).await, StatusCode::FORBIDDEN);
+    assert_eq!(h.authz_host("open.example.com", &stranger).await, StatusCode::FORBIDDEN);
+
+    h.app.flush_seen().await.unwrap();
+    for host in ["artifact.example.com", "locked.example.com"] {
+        h.json("POST", "/api/apps", Some(json!({"host": host}))).await;
+    }
+    let (status, _) = h
+        .json(
+            "PUT",
+            "/api/apps",
+            Some(json!({
+                "hosts": ["artifact.example.com", "locked.example.com"],
+                "restricted": true,
+                "groups": ["admin"]
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(h.authz_host("locked.example.com", &bot).await, StatusCode::FORBIDDEN);
+    assert_eq!(h.authz_host("artifact.example.com", &bot).await, StatusCode::FORBIDDEN);
+    assert_eq!(h.authz_host("artifact.example.com", &uploader).await, StatusCode::OK);
+    assert_eq!(h.authz_host("locked.example.com", &uploader).await, StatusCode::FORBIDDEN);
+
+    write(&format!(
+        r#"[{{"name":"qa-bot","fingerprint_sha256":"{stranger}","hosts":"unrestricted"}}]"#
+    ));
+    assert!(h.app.identities.reload().unwrap());
+    assert!(!h.app.identities.reload().unwrap());
+    assert_eq!(h.authz_host("open.example.com", &stranger).await, StatusCode::OK);
+    assert_eq!(h.authz_host("open.example.com", &bot).await, StatusCode::FORBIDDEN);
+    assert_eq!(h.authz_host("artifact.example.com", &uploader).await, StatusCode::FORBIDDEN);
+
+    write("not json");
+    assert!(h.app.identities.reload().is_err());
+    assert_eq!(h.authz_host("open.example.com", &stranger).await, StatusCode::OK);
+}

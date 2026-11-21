@@ -100,6 +100,7 @@ Apps are hostnames behind the gateway. tegata learns them from `/authz` traffic,
 they can be added by hand. An app is open to every valid device until it is
 `restricted`; then only devices sharing one of its `groups` pass. Certificates tegata
 did not issue (allowed with `TEGATA_AUTHZ_ALLOW_UNKNOWN`) only pass open apps.
+[Service identities](deployment.md#service-identities) pass the hosts they declare.
 
 | Method | Path | Body | Response |
 |---|---|---|---|

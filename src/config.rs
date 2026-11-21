@@ -10,6 +10,7 @@ use crate::app::{App, Settings};
 use crate::auth::Auth;
 use crate::ca::{Ca, LocalCa, OpenBaoCa};
 use crate::db::Db;
+use crate::identities::Identities;
 use crate::kube::ConfigMapWriter;
 use crate::openbao::{self, OpenBao};
 use crate::store::{FileStore, MemoryStore, OpenBaoStore, Store};
@@ -84,6 +85,10 @@ pub struct Cli {
     /// Let `/authz` accept certificates tegata did not issue, e.g. while migrating.
     #[arg(long, env = "TEGATA_AUTHZ_ALLOW_UNKNOWN", default_value_t = false)]
     pub authz_allow_unknown: bool,
+    /// JSON file of service identities: certificates tegata did not issue, authorised like
+    /// devices. Re-read when it changes.
+    #[arg(long, env = "TEGATA_SERVICE_IDENTITIES")]
+    pub service_identities: Option<PathBuf>,
 
     /// `namespace/name` of a ConfigMap to keep filled with `ca.crt` and `ca.crl`.
     #[arg(long, env = "TEGATA_TRUST_CONFIGMAP")]
@@ -192,11 +197,12 @@ impl Cli {
             extra_crl_pem: read_all(&self.extra_crl_files)?,
             setup_token,
         };
+        let identities = Identities::open(self.service_identities.clone())?;
         let auth = Auth::new(&settings.public_url, &settings.rp_name)?;
         let db = Db::open(store).await?;
         if db.read().await.passkeys.is_empty() && self.setup_token.is_none() {
             tracing::warn!(setup_token = %settings.setup_token, "no passkey registered yet: open the app and use this setup token");
         }
-        Ok(App::new(settings, db, ca, auth, trust))
+        Ok(App::new(settings, db, ca, auth, trust, identities))
     }
 }

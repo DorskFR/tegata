@@ -8,6 +8,7 @@ pub mod config;
 pub mod db;
 pub mod enroll;
 pub mod error;
+pub mod identities;
 pub mod kube;
 pub mod model;
 pub mod openbao;
@@ -94,8 +95,8 @@ async fn security_headers(csp: HeaderValue, req: Request, next: Next) -> Respons
     resp
 }
 
-/// Sweeps stale enrollments every minute, refreshes the published CRL periodically and
-/// picks up other replicas' writes every couple of seconds.
+/// Sweeps stale enrollments every minute, refreshes the published CRL periodically, and
+/// picks up other replicas' writes and service identity changes every few seconds.
 pub fn spawn_background(app: AppState, crl_every: Duration) {
     let refresher = app.clone();
     tokio::spawn(async move {
@@ -104,6 +105,16 @@ pub fn spawn_background(app: AppState, crl_every: Duration) {
             tick.tick().await;
             if let Err(err) = refresher.db.refresh().await {
                 tracing::warn!(error = ?err, "refreshing state failed");
+            }
+        }
+    });
+    let identities = app.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            tick.tick().await;
+            if let Err(err) = identities.identities.reload() {
+                tracing::error!(error = ?err, "reloading service identities failed, keeping the previous list");
             }
         }
     });
