@@ -71,6 +71,29 @@ Port 8081 (`TEGATA_AUTHZ_LISTEN`) only serves `/authz`; keep it off public route
 While migrating from another CA, `TEGATA_AUTHZ_ALLOW_UNKNOWN=true` lets certificates
 tegata did not issue through.
 
+## Service identities
+
+Bots and scripts that hold a certificate from another CA the gateway trusts can be
+declared instead of enrolled, so they pass `/authz` without
+`TEGATA_AUTHZ_ALLOW_UNKNOWN` and without a passkey. Point `TEGATA_SERVICE_IDENTITIES`
+at a JSON file, typically a mounted ConfigMap:
+
+```json
+[
+  { "name": "qa-bot", "fingerprint_sha256": "1b97…", "hosts": "unrestricted" },
+  { "name": "artifact-uploader", "fingerprint_sha256": "5ae6…", "hosts": ["artifact.example.com"] }
+]
+```
+
+- `fingerprint_sha256` is the SHA-256 of the DER certificate (`openssl x509 -noout
+  -fingerprint -sha256`), colons optional. It pins one certificate: rotate it here.
+- `hosts: "unrestricted"` passes every app that is not restricted to groups.
+- A host list passes only those hosts, restricted or not.
+
+tegata re-reads the file every 5 seconds. A file that does not parse stops startup, and
+on a reload it leaves the previous list in place. A certificate tegata issued always
+wins over an identity with the same fingerprint.
+
 ## Per-app access
 
 Every host seen on `/authz` shows up on the Apps page. An app is open to every valid

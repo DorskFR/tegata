@@ -51,3 +51,4 @@ flags: `tegata --help` lists them.
 | `TEGATA_EXTRA_CA_FILES` | | Comma-separated PEM files of more CAs to publish alongside tegata's own |
 | `TEGATA_EXTRA_CRL_FILES` | | Comma-separated PEM CRLs to publish, one per extra CA |
 | `TEGATA_AUTHZ_ALLOW_UNKNOWN` | `false` | Let `/authz` accept certificates tegata did not issue, e.g. while migrating from another CA |
+| `TEGATA_SERVICE_IDENTITIES` | | JSON file of [service identities](deployment.md#service-identities), re-read every 5 seconds |
