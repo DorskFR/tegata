@@ -60,9 +60,7 @@ pub async fn check(State(app): State<AppState>, headers: HeaderMap) -> Response 
         .get("user-agent")
         .and_then(|v| v.to_str().ok())
         .map(|ua| ua.chars().take(256).collect());
-    let host = ["x-forwarded-host", "host"]
-        .iter()
-        .find_map(|name| headers.get(*name).and_then(|v| v.to_str().ok()));
+    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
     let ip = client_ip(&headers);
     match app.authorize(hash.as_deref(), host, ip.clone(), user_agent.clone()).await {
         AuthzDecision::AllowUnknown => {

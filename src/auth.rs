@@ -79,7 +79,7 @@ impl App {
         if found(&self.db.read().await) {
             return true;
         }
-        if let Err(err) = self.db.refresh().await {
+        if let Err(err) = self.db.refresh_on_miss().await {
             tracing::warn!(error = ?err, "refreshing state failed");
         }
         found(&self.db.read().await)
@@ -144,19 +144,22 @@ impl App {
     async fn take_ceremony(&self, jar: &CookieJar) -> ApiResult<CeremonyRecord> {
         let id = challenge_id(jar)?;
         let hash = sha256_hex(id.as_bytes());
-        if let Err(err) = self.db.refresh().await {
+        let take = |s: &mut State| {
+            s.prune(now());
+            let at = s
+                .ceremonies
+                .iter()
+                .position(|c| c.id_hash == hash)
+                .ok_or_else(|| ApiError::bad_request("passkey ceremony expired, try again"))?;
+            Ok::<_, ApiError>(s.ceremonies.remove(at))
+        };
+        if let Ok(ceremony) = self.db.update(take).await {
+            return Ok(ceremony);
+        }
+        if let Err(err) = self.db.refresh_on_miss().await {
             tracing::warn!(error = ?err, "refreshing state failed");
         }
-        self.db
-            .update(|s| {
-                s.prune(now());
-                let at =
-                    s.ceremonies.iter().position(|c| c.id_hash == hash).ok_or_else(|| {
-                        ApiError::bad_request("passkey ceremony expired, try again")
-                    })?;
-                Ok(s.ceremonies.remove(at))
-            })
-            .await
+        self.db.update(take).await
     }
 
     pub async fn start_registration(

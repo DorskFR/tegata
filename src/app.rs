@@ -356,42 +356,42 @@ impl App {
     /// Taking the link is one check-and-set write, so only one replica can serve it.
     pub async fn download(&self, token: &str, kind: &Download) -> ApiResult<(Vec<u8>, String)> {
         let hash = token_hash(token);
-        if let Err(err) = self.db.refresh().await {
-            tracing::warn!(error = ?err, "refreshing state failed");
-        }
         let mut superseded = Vec::new();
-        let link = self
-            .db
-            .update(|s| {
-                superseded.clear();
-                let t = now();
-                s.prune(t);
-                let at = s
-                    .enrollments
-                    .iter()
-                    .position(|e| e.token_hash == hash)
-                    .ok_or(ApiError::NotFound)?;
-                let link = s.enrollments.remove(at);
-                let d = s
-                    .devices
-                    .iter_mut()
-                    .find(|d| d.id == link.device_id)
-                    .ok_or(ApiError::NotFound)?;
-                let cert = d.cert_mut(&link.serial).ok_or(ApiError::NotFound)?;
-                if cert.state(t) != CertState::Pending {
-                    return Err(ApiError::NotFound);
+        let mut take = |s: &mut State| {
+            superseded.clear();
+            let t = now();
+            s.prune(t);
+            let at = s
+                .enrollments
+                .iter()
+                .position(|e| e.token_hash == hash)
+                .ok_or(ApiError::NotFound)?;
+            let link = s.enrollments.remove(at);
+            let d =
+                s.devices.iter_mut().find(|d| d.id == link.device_id).ok_or(ApiError::NotFound)?;
+            let cert = d.cert_mut(&link.serial).ok_or(ApiError::NotFound)?;
+            if cert.state(t) != CertState::Pending {
+                return Err(ApiError::NotFound);
+            }
+            cert.enrolled_at = Some(t);
+            for old in d.certs.iter_mut().filter(|c| c.serial != link.serial) {
+                if old.state(t) == CertState::Active {
+                    old.revoked_at = Some(t);
+                    old.superseded = true;
+                    superseded.push(old.serial.clone());
                 }
-                cert.enrolled_at = Some(t);
-                for old in d.certs.iter_mut().filter(|c| c.serial != link.serial) {
-                    if old.state(t) == CertState::Active {
-                        old.revoked_at = Some(t);
-                        old.superseded = true;
-                        superseded.push(old.serial.clone());
-                    }
+            }
+            Ok::<_, ApiError>(link)
+        };
+        let link = match self.db.update(&mut take).await {
+            Err(ApiError::NotFound) => {
+                if let Err(err) = self.db.refresh_on_miss().await {
+                    tracing::warn!(error = ?err, "refreshing state failed");
                 }
-                Ok::<_, ApiError>(link)
-            })
-            .await?;
+                self.db.update(&mut take).await
+            }
+            other => other,
+        }?;
         tracing::info!(device = %link.device_name, serial = %link.serial, "certificate downloaded");
         self.revoke_serials(&superseded).await?;
         Ok(match kind {

@@ -109,9 +109,22 @@ impl Harness {
     }
 
     async fn authz_full(&self, uri: &str, fingerprint: &str, host: Option<&str>) -> StatusCode {
+        self.authz_with(uri, fingerprint, host, &[]).await
+    }
+
+    async fn authz_with(
+        &self,
+        uri: &str,
+        fingerprint: &str,
+        host: Option<&str>,
+        extra: &[(&str, &str)],
+    ) -> StatusCode {
         let mut req = Request::builder().uri(uri);
         if let Some(host) = host {
             req = req.header(header::HOST, host);
+        }
+        for (name, value) in extra {
+            req = req.header(*name, *value);
         }
         let req = req
             .header("x-forwarded-client-cert", format!("Hash={fingerprint};Subject=\"CN=x\""))
@@ -409,6 +422,17 @@ async fn app_rules() {
         StatusCode::OK,
         "open apps stay open"
     );
+    assert_eq!(
+        h.authz_with(
+            "/authz/",
+            &kid,
+            Some("nas.example.com"),
+            &[("x-forwarded-host", "media.example.com")]
+        )
+        .await,
+        StatusCode::FORBIDDEN,
+        "a client-supplied x-forwarded-host does not pick the rule"
+    );
 
     let (_, devices) = h.json("GET", "/api/devices", None).await;
     let tablet = devices.as_array().unwrap().iter().find(|d| d["name"] == "tablet").unwrap();
@@ -692,4 +716,68 @@ async fn service_identities_are_known_without_allow_unknown() {
     write("not json");
     assert!(h.app.identities.reload().is_err());
     assert_eq!(h.authz_host("open.example.com", &stranger).await, StatusCode::OK);
+}
+
+#[derive(Default)]
+struct CountingStore {
+    inner: tegata::store::MemoryStore,
+    loads: std::sync::atomic::AtomicU32,
+}
+
+#[async_trait::async_trait]
+impl tegata::store::Store for CountingStore {
+    async fn load(&self) -> anyhow::Result<(tegata::model::State, Option<u64>)> {
+        self.loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.load().await
+    }
+
+    async fn save(
+        &self,
+        state: &tegata::model::State,
+        version: Option<u64>,
+    ) -> Result<u64, tegata::store::SaveError> {
+        self.inner.save(state, version).await
+    }
+}
+
+#[tokio::test]
+async fn unknown_enrollment_links_do_not_reload_the_store_per_request() {
+    let dir = std::env::temp_dir().join(format!("tegata-misses-{}", uuid::Uuid::new_v4()));
+    let store = Arc::new(CountingStore::default());
+    let cli = <Cli as clap::Parser>::parse_from([
+        "tegata",
+        "--public-url",
+        ORIGIN,
+        "--backend",
+        "memory",
+        "--data-dir",
+        dir.to_str().unwrap(),
+    ]);
+    let app: Arc<App> = Arc::new(cli.build_with_store(Some(store.clone())).await.unwrap());
+    let h = Harness { app, dir, cookie: String::new() };
+    let before = store.loads.load(std::sync::atomic::Ordering::SeqCst);
+
+    let mut misses = tokio::task::JoinSet::new();
+    for i in 0..40 {
+        let (uri, expected) = match i % 4 {
+            0 => (format!("/enroll/nope{i}/device.p12"), StatusCode::NOT_FOUND),
+            1 => (format!("/enroll/nope{i}/profile.mobileconfig"), StatusCode::NOT_FOUND),
+            2 => (format!("/api/enroll/nope{i}"), StatusCode::NOT_FOUND),
+            _ => ("/api/devices".to_owned(), StatusCode::UNAUTHORIZED),
+        };
+        let router = tegata::router(h.app.clone());
+        misses.spawn(async move {
+            let req = Request::builder()
+                .uri(uri)
+                .header(header::COOKIE, format!("tegata_session=nope{i}"))
+                .body(Body::empty())
+                .unwrap();
+            (router.oneshot(req).await.unwrap().status(), expected)
+        });
+    }
+    for (status, expected) in misses.join_all().await {
+        assert_eq!(status, expected);
+    }
+    let loads = store.loads.load(std::sync::atomic::Ordering::SeqCst) - before;
+    assert!(loads <= 1, "40 unknown links and sessions cost {loads} store loads");
 }

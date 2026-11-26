@@ -34,7 +34,7 @@ impl App {
         if let Some(found) = find(&self.db.read().await) {
             return Some(found);
         }
-        if let Err(err) = self.db.refresh().await {
+        if let Err(err) = self.db.refresh_on_miss().await {
             tracing::warn!(error = ?err, "refreshing state failed");
         }
         find(&self.db.read().await)

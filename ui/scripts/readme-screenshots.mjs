@@ -6,6 +6,7 @@
  *   npm run readme:shots [-- --url http://localhost:5440 --authz http://localhost:5441]
  */
 import { mkdir } from 'node:fs/promises';
+import { request } from 'node:http';
 import { parseArgs } from 'node:util';
 import { chromium } from 'playwright';
 
@@ -57,14 +58,19 @@ async function install(enrollment) {
 	await res.arrayBuffer();
 }
 
-async function touch(device, ip) {
-	await fetch(`${values.authz}/authz`, {
-		headers: {
-			'x-forwarded-client-cert': `Hash=${device.cert.fingerprint_sha256}`,
-			'x-forwarded-for': ip,
-			'x-forwarded-host': 'photos.example.com',
-			'user-agent': UA[device.name] ?? 'Mozilla/5.0'
-		}
+function touch(device, ip) {
+	return new Promise((resolve, reject) => {
+		const req = request(`${values.authz}/authz`, {
+			headers: {
+				host: 'photos.example.com',
+				'x-forwarded-client-cert': `Hash=${device.cert.fingerprint_sha256}`,
+				'x-forwarded-for': ip,
+				'user-agent': UA[device.name] ?? 'Mozilla/5.0'
+			}
+		});
+		req.on('response', (res) => res.resume().on('end', resolve));
+		req.on('error', reject);
+		req.end();
 	});
 }
 
