@@ -14,7 +14,7 @@ use crate::error::{ApiError, ApiResult};
 use crate::rules::{Caller, CallerDevice, caller_device};
 
 pub async fn session(State(app): State<AppState>, jar: CookieJar) -> Json<Value> {
-    let setup_required = app.db.read().await.passkeys.is_empty();
+    let setup_required = app.db.read().passkeys.is_empty();
     Json(json!({
         "authenticated": is_signed_in(&app, &jar).await,
         "setup_required": setup_required,
@@ -24,7 +24,7 @@ pub async fn session(State(app): State<AppState>, jar: CookieJar) -> Json<Value>
 
 pub async fn config(State(app): State<AppState>, _: Admin, caller: Caller) -> Json<Value> {
     let s = &app.settings;
-    let state = app.db.read().await;
+    let state = app.db.read();
     let this_device = match caller_device(&state, &caller) {
         CallerDevice::Unidentified => Value::Null,
         CallerDevice::Foreign => json!({ "name": null }),

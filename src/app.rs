@@ -19,7 +19,7 @@ use crate::model::{
     AppRule, CertRecord, CertState, Device, DeviceView, EnrollmentRecord, Seen, State,
 };
 use crate::rules::{clean_groups, normalize_host};
-use crate::util::{now, password, random_token};
+use crate::util::{RateLimit, now, password, random_token};
 
 pub struct Settings {
     pub public_url: Url,
@@ -57,9 +57,12 @@ pub struct App {
     seen: Mutex<HashMap<String, Seen>>,
     hosts_seen: Mutex<HashMap<String, OffsetDateTime>>,
     publish_lock: Mutex<()>,
+    pub(crate) login_starts: RateLimit,
 }
 
 const MAX_TRACKED_HOSTS: usize = 1000;
+/// Sign-in attempts one replica starts per second; anyone can call it.
+const LOGIN_STARTS_PER_SECOND: u32 = 5;
 
 pub type AppState = Arc<App>;
 
@@ -130,6 +133,10 @@ impl App {
             seen: Mutex::new(HashMap::new()),
             hosts_seen: Mutex::new(HashMap::new()),
             publish_lock: Mutex::new(()),
+            login_starts: RateLimit::new(
+                LOGIN_STARTS_PER_SECOND,
+                std::time::Duration::from_secs(1),
+            ),
         }
     }
 
@@ -147,8 +154,7 @@ impl App {
     }
 
     pub async fn devices(&self) -> Vec<DeviceView> {
-        let mut devices: Vec<_> =
-            self.db.read().await.devices.iter().map(|d| self.view(d)).collect();
+        let mut devices: Vec<_> = self.db.read().devices.iter().map(|d| self.view(d)).collect();
         devices.sort_by_key(|d| d.name.to_lowercase());
         devices
     }
@@ -185,6 +191,7 @@ impl App {
             enrollment_expires_at: Some(expires_at),
             enrolled_at: None,
             revoked_at: None,
+            ca_revoked_at: None,
             superseded: false,
         };
         let link = EnrollmentRecord {
@@ -216,7 +223,7 @@ impl App {
         let groups = clean_groups(groups)?;
         let validity = self.validity(validity_days)?;
         let taken = |s: &State| s.devices.iter().any(|d| d.name.eq_ignore_ascii_case(&name));
-        if taken(&self.db.read().await) {
+        if taken(self.db.read().as_ref()) {
             return Err(ApiError::Conflict(format!("a device named {name} already exists")));
         }
         let id = Uuid::new_v4();
@@ -259,7 +266,7 @@ impl App {
     }
 
     async fn find(&self, id: Uuid) -> ApiResult<Device> {
-        self.db.read().await.devices.into_iter().find(|d| d.id == id).ok_or(ApiError::NotFound)
+        self.db.read().devices.iter().find(|d| d.id == id).cloned().ok_or(ApiError::NotFound)
     }
 
     /// Issues a replacement; the current cert stays valid until the new one is downloaded.
@@ -301,7 +308,7 @@ impl App {
                 Ok::<_, ApiError>(self.view(d))
             })
             .await?;
-        self.revoke_serials(&stale).await?;
+        self.revoke_serials(&stale).await;
         Ok(Created { device: view, enrollment })
     }
 
@@ -322,7 +329,7 @@ impl App {
             })
             .await?;
         tracing::info!(device = %view.name, ?serials, "device revoked");
-        self.revoke_serials(&serials).await?;
+        self.revoke_serials(&serials).await;
         Ok(view)
     }
 
@@ -339,17 +346,39 @@ impl App {
             .await
     }
 
-    async fn revoke_serials(&self, serials: &[String]) -> ApiResult<()> {
-        if serials.is_empty() {
-            return Ok(());
-        }
+    /// Revokes each serial at the CA and records which ones it confirmed; the sweep
+    /// retries the rest, so callers never fail on it.
+    async fn revoke_serials(&self, serials: &[String]) {
+        let mut confirmed = Vec::new();
         for serial in serials {
-            self.ca.revoke(serial).await?;
+            match self.ca.revoke(serial).await {
+                Ok(()) => confirmed.push(serial.clone()),
+                Err(err) => {
+                    tracing::error!(%serial, error = ?err, "revoking at the CA failed, the sweep retries it");
+                }
+            }
+        }
+        if confirmed.is_empty() {
+            return;
+        }
+        let t = now();
+        let recorded = self
+            .db
+            .update(|s| {
+                for cert in s.devices.iter_mut().flat_map(|d| d.certs.iter_mut()) {
+                    if confirmed.contains(&cert.serial) {
+                        cert.ca_revoked_at.get_or_insert(t);
+                    }
+                }
+                Ok::<_, anyhow::Error>(())
+            })
+            .await;
+        if let Err(err) = recorded {
+            tracing::error!(error = ?err, "recording CA revocations failed, the sweep retries them");
         }
         if let Err(err) = self.publish_trust().await {
             tracing::error!(error = ?err, "publishing the CRL after a revocation failed");
         }
-        Ok(())
     }
 
     /// Hands out the bundle once, marks the cert installed and retires the one it replaces.
@@ -393,26 +422,32 @@ impl App {
             other => other,
         }?;
         tracing::info!(device = %link.device_name, serial = %link.serial, "certificate downloaded");
-        self.revoke_serials(&superseded).await?;
-        Ok(match kind {
-            Download::Profile => (link.mobileconfig.into_bytes(), link.device_name),
-            Download::Pkcs12 => (p12_bytes(&link)?, link.device_name),
-        })
+        let bundle = match kind {
+            Download::Profile => link.mobileconfig.into_bytes(),
+            Download::Pkcs12 => p12_bytes(&link)?,
+        };
+        self.revoke_serials(&superseded).await;
+        Ok((bundle, link.device_name))
     }
 
-    /// Revokes certs whose install link expired or was lost in a restart.
+    /// Revokes certs whose install link expired or was lost in a restart, and retries
+    /// revocations the CA has not confirmed.
     pub async fn sweep(&self) -> anyhow::Result<()> {
         let t = now();
         let mut orphans = Vec::new();
+        let mut unconfirmed = Vec::new();
         self.db
             .update(|s| {
                 orphans.clear();
+                unconfirmed.clear();
                 s.prune(t);
                 let live: Vec<String> = s.enrollments.iter().map(|e| e.serial.clone()).collect();
                 for cert in s.devices.iter_mut().flat_map(|d| d.certs.iter_mut()) {
                     if cert.state(t) == CertState::Pending && !live.contains(&cert.serial) {
                         cert.revoked_at = Some(t);
                         orphans.push(cert.serial.clone());
+                    } else if cert.awaits_ca_revoke(t) {
+                        unconfirmed.push(cert.serial.clone());
                     }
                 }
                 Ok::<_, anyhow::Error>(())
@@ -420,8 +455,12 @@ impl App {
             .await?;
         if !orphans.is_empty() {
             tracing::info!(?orphans, "revoked certificates that were never installed");
-            self.revoke_serials(&orphans).await.map_err(|e| anyhow::anyhow!("{e}"))?;
         }
+        if !unconfirmed.is_empty() {
+            tracing::warn!(?unconfirmed, "retrying revocations the CA has not confirmed");
+        }
+        orphans.append(&mut unconfirmed);
+        self.revoke_serials(&orphans).await;
         self.flush_seen().await
     }
 
@@ -470,7 +509,7 @@ impl App {
                 hosts.insert(host.clone(), t);
             }
         }
-        let state = self.db.read().await;
+        let state = self.db.read();
         let rule = host.as_ref().and_then(|h| state.apps.iter().find(|a| &a.host == h));
         let found = state.devices.iter().find_map(|d| {
             d.certs.iter().find(|c| c.fingerprint_sha256 == fingerprint).map(|c| (d, c))

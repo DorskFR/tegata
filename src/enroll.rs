@@ -31,12 +31,12 @@ impl App {
                 .find(|e| e.token_hash == hash && e.expires_at > t)
                 .map(|e| (e.device_name.clone(), e.expires_at))
         };
-        if let Some(found) = find(&self.db.read().await) {
+        if let Some(found) = find(self.db.read().as_ref()) {
             return Some(found);
         }
         if let Err(err) = self.db.refresh_on_miss().await {
             tracing::warn!(error = ?err, "refreshing state failed");
         }
-        find(&self.db.read().await)
+        find(self.db.read().as_ref())
     }
 }

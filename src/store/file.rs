@@ -5,6 +5,7 @@ use async_trait::async_trait;
 
 use super::{SaveError, Store};
 use crate::model::State;
+use crate::util::write_atomic;
 
 pub struct FileStore {
     path: PathBuf,
@@ -35,9 +36,7 @@ impl Store for FileStore {
         if let Some(dir) = self.path.parent() {
             tokio::fs::create_dir_all(dir).await.context("creating state dir")?;
         }
-        let tmp = self.path.with_extension("tmp");
-        tokio::fs::write(&tmp, bytes).await.context("writing state")?;
-        tokio::fs::rename(&tmp, &self.path).await.context("replacing state")?;
+        write_atomic(&self.path, &bytes, 0o600).await.context("writing state")?;
         Ok(0)
     }
 }

@@ -32,6 +32,9 @@ pub struct SessionRecord {
     pub token_hash: String,
     #[serde(with = "time::serde::rfc3339")]
     pub expires_at: OffsetDateTime,
+    /// The passkey that signed in; deleting it ends the session.
+    #[serde(default)]
+    pub passkey_id: Option<Uuid>,
 }
 
 /// A passkey ceremony between its start and finish requests, which may reach different
@@ -113,6 +116,9 @@ pub struct CertRecord {
     pub enrolled_at: Option<OffsetDateTime>,
     #[serde(with = "time::serde::rfc3339::option", default)]
     pub revoked_at: Option<OffsetDateTime>,
+    /// When the CA confirmed the revocation, so it reaches the CRL.
+    #[serde(with = "time::serde::rfc3339::option", default)]
+    pub ca_revoked_at: Option<OffsetDateTime>,
     #[serde(default)]
     pub superseded: bool,
 }
@@ -171,6 +177,11 @@ impl CertRecord {
 
     pub fn is_live(&self, now: OffsetDateTime) -> bool {
         matches!(self.state(now), CertState::Pending | CertState::Active)
+    }
+
+    /// Revoked here but not yet at the CA, and still worth putting on the CRL.
+    pub fn awaits_ca_revoke(&self, now: OffsetDateTime) -> bool {
+        self.revoked_at.is_some() && self.ca_revoked_at.is_none() && self.not_after > now
     }
 }
 
@@ -326,6 +337,7 @@ mod tests {
             enrollment_expires_at: Some(issued + Duration::minutes(30)),
             enrolled_at: None,
             revoked_at: None,
+            ca_revoked_at: None,
             superseded: false,
         }
     }

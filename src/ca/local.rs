@@ -12,7 +12,7 @@ use time::{Duration, OffsetDateTime};
 use tokio::sync::Mutex;
 
 use super::{Ca, Issued, pem_not_after, subject_of};
-use crate::util::{format_serial, normalize_serial, now};
+use crate::util::{format_serial, normalize_serial, now, write_atomic};
 
 #[derive(Default, Serialize, Deserialize)]
 struct Revoked {
@@ -69,13 +69,7 @@ impl LocalCa {
 }
 
 async fn write_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
-    tokio::fs::write(path, bytes).await?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await?;
-    }
-    Ok(())
+    Ok(write_atomic(path, bytes, 0o600).await?)
 }
 
 #[async_trait]
@@ -113,7 +107,8 @@ impl Ca for LocalCa {
         let mut revoked = self.revoked.lock().await;
         if !revoked.serials.iter().any(|(s, _)| *s == serial) {
             revoked.serials.push((serial, now().unix_timestamp()));
-            tokio::fs::write(self.dir.join("revoked.json"), serde_json::to_vec(&*revoked)?).await?;
+            write_atomic(&self.dir.join("revoked.json"), &serde_json::to_vec(&*revoked)?, 0o644)
+                .await?;
         }
         Ok(())
     }
@@ -159,5 +154,28 @@ impl Ca for LocalCa {
 
     fn not_after(&self) -> OffsetDateTime {
         self.not_after
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn key_is_private_from_creation_and_revocations_survive_reopening() {
+        let dir = std::env::temp_dir().join(format!("tegata-localca-{}", uuid::Uuid::new_v4()));
+        let ca = LocalCa::open(dir.clone(), "test CA").await.unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.join("ca.key")).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        ca.revoke("01:02").await.unwrap();
+        ca.revoke("03:04").await.unwrap();
+        assert!(!dir.join("revoked.tmp").exists());
+        let reopened = LocalCa::open(dir.clone(), "test CA").await.unwrap();
+        assert_eq!(reopened.revoked.lock().await.serials.len(), 2);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

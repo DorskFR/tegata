@@ -76,15 +76,31 @@ pub async fn check(State(app): State<AppState>, headers: HeaderMap) -> Response 
         }
         AuthzDecision::Allow { device } => {
             let mut resp = StatusCode::OK.into_response();
-            if let Ok(value) = HeaderValue::from_str(&device)
-                && !device.is_empty()
-            {
-                resp.headers_mut().insert("x-tegata-device", value);
+            if !device.is_empty() {
+                match HeaderValue::from_str(&header_safe(&device)) {
+                    Ok(value) => {
+                        resp.headers_mut().insert("x-tegata-device", value);
+                    }
+                    Err(err) => tracing::warn!(%device, %err, "x-tegata-device left out"),
+                }
             }
             resp
         }
         AuthzDecision::Deny(reason) => denied_page(&reason),
     }
+}
+
+/// Percent-encodes `%` and every byte outside printable ASCII, so any name fits a header.
+fn header_safe(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for byte in name.bytes() {
+        if (0x20..0x7f).contains(&byte) && byte != b'%' {
+            out.push(char::from(byte));
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
 }
 
 fn html_escape(s: &str) -> String {
@@ -165,6 +181,17 @@ mod tests {
         );
         assert_eq!(xfcc_cn("Hash=ab"), None);
         assert_eq!(xfcc_cn(r#"Hash=ab;Subject="O=no cn""#), None);
+    }
+
+    #[test]
+    fn device_names_always_fit_a_header() {
+        assert_eq!(header_safe("Zoe's phone"), "Zoe's phone");
+        assert_eq!(header_safe("iPhone de Zoé"), "iPhone de Zo%C3%A9");
+        assert_eq!(header_safe("100%"), "100%25");
+        assert_eq!(header_safe("太郎"), "%E5%A4%AA%E9%83%8E");
+        for name in ["iPhone de Zoé", "太郎のPixel", "tab\tname"] {
+            assert!(HeaderValue::from_str(&header_safe(name)).is_ok(), "{name}");
+        }
     }
 
     #[tokio::test]
