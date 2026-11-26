@@ -16,7 +16,7 @@ use crate::error::{ApiError, ApiResult};
 use crate::identities::Identities;
 use crate::kube::ConfigMapWriter;
 use crate::model::{
-    AppRule, CertRecord, CertState, Device, DeviceView, EnrollmentRecord, Seen, State,
+    AppRule, CertRecord, CertState, Device, DeviceView, EnrollmentRecord, RetiredCert, Seen, State,
 };
 use crate::rules::{clean_groups, normalize_host};
 use crate::util::{RateLimit, now, password, random_token};
@@ -35,6 +35,10 @@ pub struct Settings {
     pub extra_ca_pem: Vec<String>,
     pub extra_crl_pem: Vec<String>,
     pub setup_token: String,
+    /// Oldest state `/authz` and readiness accept before refusing.
+    pub max_state_age: std::time::Duration,
+    /// Proxies in front of Envoy that append to `X-Forwarded-For`.
+    pub trusted_hops: usize,
 }
 
 impl Settings {
@@ -337,9 +341,22 @@ impl App {
         self.db
             .update(|s| {
                 let d = s.devices.iter().find(|d| d.id == id).ok_or(ApiError::NotFound)?;
-                if d.has_live_cert(now()) {
+                let t = now();
+                if d.has_live_cert(t) {
                     return Err(ApiError::Conflict("revoke the device before deleting it".into()));
                 }
+                let retired: Vec<RetiredCert> = d
+                    .certs
+                    .iter()
+                    .filter(|c| c.not_after > t)
+                    .map(|c| RetiredCert {
+                        fingerprint_sha256: c.fingerprint_sha256.clone(),
+                        serial: c.serial.clone(),
+                        device_name: d.name.clone(),
+                        not_after: c.not_after,
+                    })
+                    .collect();
+                s.retired.extend(retired);
                 s.devices.retain(|d| d.id != id);
                 Ok(())
             })
@@ -483,12 +500,25 @@ impl App {
     pub async fn publish_trust(&self) -> anyhow::Result<()> {
         let Some(writer) = &self.trust else { return Ok(()) };
         let _guard = self.publish_lock.lock().await;
-        writer.apply(&self.trust_bundle().await?).await
+        let bundle = self.trust_bundle().await?;
+        if let Some(published) = writer.current("ca.crl").await?
+            && bundle.get("ca.crl").is_some_and(|crl| crate::kube::older_crl(crl, &published))
+        {
+            tracing::info!("kept the published CRL, it is newer than the one fetched");
+            return Ok(());
+        }
+        writer.apply(&bundle).await
     }
 
     pub async fn refresh_crl(&self) -> anyhow::Result<()> {
         self.ca.refresh_crl().await?;
         self.publish_trust().await
+    }
+
+    /// Whether the state is recent enough to decide on; past `max_state_age` revocations
+    /// made on other replicas may be missing.
+    pub fn state_is_fresh(&self) -> bool {
+        self.db.state_age() <= self.settings.max_state_age
     }
 
     pub async fn authorize(
@@ -520,6 +550,13 @@ impl App {
                     .lock()
                     .await
                     .insert(fingerprint, Seen { at: t, ip: ip.clone(), user_agent });
+                if host.is_none() && state.apps.iter().any(|a| a.restricted) {
+                    tracing::warn!(device = %device.name, ?ip, "refused a check without a usable host while some apps are restricted");
+                    return AuthzDecision::Deny(DenyReason::NotAllowed {
+                        device: device.name.clone(),
+                        host: "(unknown host)".into(),
+                    });
+                }
                 if rule.is_some_and(|r| !r.admits(&device.groups)) {
                     tracing::info!(device = %device.name, ?host, ?ip, "device is not allowed on this app");
                     return AuthzDecision::Deny(DenyReason::NotAllowed {
@@ -534,6 +571,14 @@ impl App {
                 AuthzDecision::Deny(DenyReason::NoLongerValid { device: device.name.clone() })
             }
             None => {
+                if let Some(retired) =
+                    state.retired.iter().find(|r| r.fingerprint_sha256 == fingerprint)
+                {
+                    tracing::warn!(device = %retired.device_name, serial = %retired.serial, ?ip, "rejected a certificate of a deleted device");
+                    return AuthzDecision::Deny(DenyReason::NoLongerValid {
+                        device: retired.device_name.clone(),
+                    });
+                }
                 if let Some(identity) = self.identities.find(&fingerprint) {
                     if identity.admits(host.as_deref(), rule.is_some_and(|r| r.restricted)) {
                         tracing::debug!(identity = %identity.name, ?host, ?ip, "allowed a service identity");

@@ -17,6 +17,18 @@ pub struct State {
     pub ceremonies: Vec<CeremonyRecord>,
     #[serde(default)]
     pub enrollments: Vec<EnrollmentRecord>,
+    /// Certs of deleted devices, kept until they expire so they stay refused.
+    #[serde(default)]
+    pub retired: Vec<RetiredCert>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RetiredCert {
+    pub fingerprint_sha256: String,
+    pub serial: String,
+    pub device_name: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub not_after: OffsetDateTime,
 }
 
 impl State {
@@ -24,6 +36,7 @@ impl State {
         self.sessions.retain(|s| s.expires_at > now);
         self.ceremonies.retain(|c| c.expires_at > now);
         self.enrollments.retain(|e| e.expires_at > now);
+        self.retired.retain(|r| r.not_after > now);
     }
 }
 
@@ -35,6 +48,8 @@ pub struct SessionRecord {
     /// The passkey that signed in; deleting it ends the session.
     #[serde(default)]
     pub passkey_id: Option<Uuid>,
+    #[serde(with = "time::serde::rfc3339::option", default)]
+    pub authenticated_at: Option<OffsetDateTime>,
 }
 
 /// A passkey ceremony between its start and finish requests, which may reach different
@@ -139,6 +154,9 @@ pub struct PasskeyRecord {
     pub created_at: OffsetDateTime,
     #[serde(with = "time::serde::rfc3339::option", default)]
     pub last_used_at: Option<OffsetDateTime>,
+    /// The passkey whose session added this one.
+    #[serde(default)]
+    pub added_by: Option<Uuid>,
     pub passkey: Passkey,
 }
 

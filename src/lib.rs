@@ -58,7 +58,7 @@ pub fn router(app: AppState) -> Router {
         .route("/enroll/{token}/device.p12", get(api::download_p12))
         .route("/ca.crt", get(api::ca_pem))
         .route("/crl.pem", get(api::crl_pem))
-        .route("/healthz", get(|| async { "ok" }))
+        .route("/healthz", get(ready))
         .fallback(web::serve)
         .layer(middleware::from_fn(move |req, next| security_headers(csp.clone(), req, next)))
         .layer(tower_http::trace::TraceLayer::new_for_http())
@@ -71,6 +71,15 @@ pub fn authz_router(app: AppState) -> Router {
         .route("/healthz", get(|| async { "ok" }))
         .fallback(any(authz::check))
         .with_state(app)
+}
+
+/// Readiness: not ready while the state is too old to decide on.
+async fn ready(State(app): State<AppState>) -> Response {
+    if app.state_is_fresh() {
+        "ok".into_response()
+    } else {
+        (axum::http::StatusCode::SERVICE_UNAVAILABLE, "state is stale").into_response()
+    }
 }
 
 /// Rejects state-changing API calls that do not come from the app's own origin.
