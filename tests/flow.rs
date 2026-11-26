@@ -856,7 +856,7 @@ async fn failed_ca_revocations_keep_the_bundle_and_are_retried() {
     let (status, bundle, _) =
         h.call("GET", &format!("/enroll/{}/device.p12", token_of(&rotated)), None, false).await;
     assert_eq!(status, StatusCode::OK, "the consumed link still hands out the bundle");
-    assert!(!bundle.is_empty());
+    assert!(bundle.len() > 100, "a real PKCS#12 bundle");
     let (status, _) = h.json("POST", &format!("/api/devices/{id}/revoke"), None).await;
     assert_eq!(status, StatusCode::OK);
     let serials: Vec<String> =
