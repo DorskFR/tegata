@@ -96,6 +96,29 @@ impl Harness {
         (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
     }
 
+    /// A browser call from `address`, with `cookies` instead of the harness session.
+    async fn browser(
+        &self,
+        address: &str,
+        cookies: &str,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, Value, header::HeaderMap) {
+        let req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::ORIGIN, ORIGIN)
+            .header("x-forwarded-for", address)
+            .header(header::COOKIE, cookies)
+            .header(header::CONTENT_TYPE, "application/json");
+        let body = body.map_or_else(Body::empty, |b| Body::from(b.to_string()));
+        let resp = tegata::router(self.app.clone()).oneshot(req.body(body).unwrap()).await.unwrap();
+        let (status, headers) = (resp.status(), resp.headers().clone());
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null), headers)
+    }
+
     async fn authz(&self, fingerprint: &str) -> StatusCode {
         self.authz_at("/authz/some/path", fingerprint).await
     }
@@ -646,8 +669,6 @@ async fn replicas_share_sessions_links_and_rules() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{start}");
-    b.db.refresh().await.unwrap();
-    assert_eq!(b.db.read().ceremonies.len(), 1, "passkey ceremonies are shared too");
 }
 
 #[tokio::test]
@@ -931,10 +952,43 @@ async fn deleting_a_passkey_ends_the_sessions_it_opened() {
     assert_eq!(owner.json("GET", "/api/devices", None).await.0, StatusCode::OK);
 }
 
-#[tokio::test]
-async fn passkey_ceremonies_are_capped_and_sign_in_starts_rate_limited() {
-    let h = harness().await;
-    let key = passkey("key");
+fn challenge_cookie(headers: &header::HeaderMap) -> String {
+    headers
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|v| v.starts_with("tegata_challenge="))
+        .and_then(|v| v.split(';').next())
+        .expect("a challenge cookie")
+        .to_owned()
+}
+
+fn forged_assertion() -> Value {
+    json!({
+        "id": "AAAA",
+        "rawId": "AAAA",
+        "type": "public-key",
+        "response": {
+            "authenticatorData": "AAAA",
+            "clientDataJSON": "AAAA",
+            "signature": "AAAA",
+            "userHandle": null
+        },
+        "extensions": {}
+    })
+}
+
+fn forged_attestation() -> Value {
+    json!({
+        "id": "AAAA",
+        "rawId": "AAAA",
+        "type": "public-key",
+        "response": { "attestationObject": "AAAA", "clientDataJSON": "AAAA" },
+        "extensions": {}
+    })
+}
+
+async fn with_passkey(h: &Harness, key: &tegata::model::PasskeyRecord) {
     h.app
         .db
         .update(|s| {
@@ -943,20 +997,142 @@ async fn passkey_ceremonies_are_capped_and_sign_in_starts_rate_limited() {
         })
         .await
         .unwrap();
-    for _ in 0..40 {
-        let (status, body) =
-            h.json("POST", "/api/auth/register/start", Some(json!({"name": "another"}))).await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-    }
-    assert_eq!(h.app.db.read().ceremonies.len(), 32, "the oldest ceremonies give way");
+}
 
+#[tokio::test]
+async fn stored_passkeys_keep_signing_in_through_kagi() {
+    let h = harness().await;
+    let key = passkey("key");
+    with_passkey(&h, &key).await;
+    let (status, options, _) =
+        h.browser("203.0.113.1", "", "POST", "/api/auth/login/start", None).await;
+    assert_eq!(status, StatusCode::OK, "{options}");
+    let allowed = &options["publicKey"]["allowCredentials"];
+    let stored = base64::Engine::encode(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        key.passkey.cred_id().as_slice(),
+    );
+    assert_eq!(allowed[0]["id"], stored, "{options}");
+    assert_eq!(options["publicKey"]["rpId"], "tegata.test");
+    assert_eq!(options["publicKey"]["userVerification"], "required");
+}
+
+#[tokio::test]
+async fn a_sign_in_flood_from_one_address_never_locks_out_another() {
+    let h = harness().await;
+    with_passkey(&h, &passkey("key")).await;
     let mut statuses = Vec::new();
-    for _ in 0..20 {
-        statuses.push(h.call("POST", "/api/auth/login/start", None, false).await.0);
+    for _ in 0..30 {
+        let (status, _, _) =
+            h.browser("198.51.100.9", "", "POST", "/api/auth/login/start", None).await;
+        statuses.push(status);
     }
-    assert!(statuses.iter().filter(|s| **s == StatusCode::OK).count() <= 10, "{statuses:?}");
-    assert!(statuses.contains(&StatusCode::TOO_MANY_REQUESTS), "{statuses:?}");
-    assert_eq!(h.app.db.read().ceremonies.len(), 32);
+    assert_eq!(statuses.iter().filter(|s| **s == StatusCode::OK).count(), 20, "{statuses:?}");
+    assert_eq!(statuses.last(), Some(&StatusCode::TOO_MANY_REQUESTS));
+    let (status, _, _) =
+        h.browser("2001:db8:1:2::9", "", "POST", "/api/auth/login/start", None).await;
+    assert_eq!(status, StatusCode::OK, "another address still signs in");
+}
+
+#[tokio::test]
+async fn rejected_sign_ins_throttle_only_their_address() {
+    let h = harness().await;
+    with_passkey(&h, &passkey("key")).await;
+    let attacker = "198.51.100.66";
+    for _ in 0..10 {
+        let (status, _, headers) =
+            h.browser(attacker, "", "POST", "/api/auth/login/start", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let cookie = challenge_cookie(&headers);
+        let (status, body, _) = h
+            .browser(attacker, &cookie, "POST", "/api/auth/login/finish", Some(forged_assertion()))
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        let (status, _, _) = h
+            .browser(attacker, &cookie, "POST", "/api/auth/login/finish", Some(forged_assertion()))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "a ceremony is used once");
+    }
+    let (status, _, _) = h.browser(attacker, "", "POST", "/api/auth/login/start", None).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    let (status, _, _) = h.browser("203.0.113.5", "", "POST", "/api/auth/login/start", None).await;
+    assert_eq!(status, StatusCode::OK, "the admin's address is not throttled");
+}
+
+#[tokio::test]
+async fn wrong_setup_tokens_throttle_their_address() {
+    let h = harness().await;
+    let guess = json!({"name": "k", "setup_token": "guess"});
+    for _ in 0..10 {
+        let (status, _, _) = h
+            .browser("198.51.100.7", "", "POST", "/api/auth/register/start", Some(guess.clone()))
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+    let right = json!({"name": "k", "setup_token": "setup"});
+    let (status, _, _) = h
+        .browser("198.51.100.7", "", "POST", "/api/auth/register/start", Some(right.clone()))
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    let (status, _, _) =
+        h.browser("203.0.113.5", "", "POST", "/api/auth/register/start", Some(right)).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_registration_finishes_only_in_the_session_that_started_it() {
+    let h = harness().await;
+    with_passkey(&h, &passkey("key")).await;
+    let other = h.app.open_session(1).await.unwrap();
+    let mine = h.cookie.clone();
+    let (status, _, headers) = h
+        .browser(
+            "203.0.113.5",
+            &mine,
+            "POST",
+            "/api/auth/register/start",
+            Some(json!({"name": "new"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let challenge = challenge_cookie(&headers);
+    let finish = json!({"name": "new", "credential": forged_attestation()});
+    let theirs = format!("tegata_session={other}; {challenge}");
+    let (status, body, _) =
+        h.browser("203.0.113.5", &theirs, "POST", "/api/auth/register/finish", Some(finish)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(h.app.db.read().passkeys.len(), 1);
+}
+
+#[tokio::test]
+async fn removing_a_passkey_needs_a_recent_sign_in() {
+    let h = harness().await;
+    let (kept, target) = (passkey("kept"), passkey("target"));
+    let stale = tegata::model::SessionRecord {
+        token_hash: tegata::util::sha256_hex(b"stale"),
+        expires_at: tegata::util::now() + time::Duration::hours(1),
+        passkey_id: Some(kept.id),
+        authenticated_at: Some(tegata::util::now() - time::Duration::minutes(10)),
+    };
+    h.app
+        .db
+        .update(|s| {
+            s.passkeys.extend([kept.clone(), target.clone()]);
+            s.sessions.push(stale.clone());
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
+        .unwrap();
+    let uri = format!("/api/passkeys/{}", target.id);
+    let (status, body, _) =
+        h.browser("203.0.113.5", "tegata_session=stale", "DELETE", &uri, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(h.app.db.read().passkeys.len(), 2);
+    let (status, _, _) = h.call("DELETE", &uri, None, true).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "a fresh sign-in may remove one");
+    let last = format!("/api/passkeys/{}", kept.id);
+    let (status, _, _) = h.call("DELETE", &last, None, true).await;
+    assert_eq!(status, StatusCode::CONFLICT, "the last passkey stays");
 }
 
 fn cli_with(dir: &std::path::Path, extra: &[&str]) -> Cli {

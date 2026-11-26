@@ -1560,6 +1560,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "kagi"
+version = "0.1.0"
+source = "git+https://github.com/DorskFR/kagi?tag=v0.1.0#58eb46be0e203ea2f8d8238ceb23e0e2ee564439"
+dependencies = [
+ "base64 0.23.1",
+ "getrandom 0.4.3",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.21",
+ "webauthn-rs",
+]
+
+[[package]]
 name = "kbkdf"
 version = "0.1.0-rc.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2791,7 +2805,7 @@ dependencies = [
 
 [[package]]
 name = "tegata"
-version = "0.9.4"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2801,6 +2815,7 @@ dependencies = [
  "clap",
  "hex",
  "http-body-util",
+ "kagi",
  "mime_guess",
  "p12-keystore",
  "pem 3.0.6",
@@ -2821,7 +2836,6 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
- "webauthn-rs",
  "x509-parser",
 ]
 

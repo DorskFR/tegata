@@ -1,3 +1,10 @@
+import type {
+	AuthenticationResponseJSON,
+	CreationOptionsJSON,
+	RegistrationResponseJSON,
+	RequestOptionsJSON
+} from '@dorsk/kagi';
+
 export type Session = { authenticated: boolean; setup_required: boolean; rp_name: string };
 export type Passkey = { id: string; name: string; created_at: string; last_used_at: string | null };
 
@@ -98,21 +105,18 @@ async function request<T>(method: Method, path: string, body?: unknown): Promise
 	return (await res.json()) as T;
 }
 
-export type RegisterStart = { publicKey: PublicKeyCredentialCreationOptionsJSON };
-export type LoginStart = { publicKey: PublicKeyCredentialRequestOptionsJSON };
-
 export const api = {
 	session: () => request<Session>('GET', '/api/session'),
 	auth: {
 		registerStart: (name: string, setup_token?: string) =>
-			request<RegisterStart>('POST', '/api/auth/register/start', {
+			request<CreationOptionsJSON>('POST', '/api/auth/register/start', {
 				name,
 				...(setup_token ? { setup_token } : {})
 			}),
-		registerFinish: (credential: unknown) =>
-			request<void>('POST', '/api/auth/register/finish', credential),
-		loginStart: () => request<LoginStart>('POST', '/api/auth/login/start', {}),
-		loginFinish: (credential: unknown) =>
+		registerFinish: (name: string, credential: RegistrationResponseJSON) =>
+			request<void>('POST', '/api/auth/register/finish', { name, credential }),
+		loginStart: () => request<RequestOptionsJSON>('POST', '/api/auth/login/start', {}),
+		loginFinish: (credential: AuthenticationResponseJSON) =>
 			request<void>('POST', '/api/auth/login/finish', credential),
 		logout: () => request<void>('POST', '/api/auth/logout')
 	},

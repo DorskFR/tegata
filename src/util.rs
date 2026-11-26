@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::net::IpAddr;
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -43,25 +45,45 @@ pub fn normalize_serial(serial: &str) -> String {
     hex::decode(&padded).map(|b| format_serial(&b)).unwrap_or(padded)
 }
 
-/// At most `max` events per `window`, counted in fixed windows.
-pub struct RateLimit {
+/// Failed sign-in and setup attempts per client network, in fixed windows. Each address only
+/// ever blocks itself.
+pub struct Failures {
     max: u32,
     window: Duration,
-    current: Mutex<(Instant, u32)>,
+    tracked: usize,
+    seen: Mutex<HashMap<Option<IpAddr>, (Instant, u32)>>,
 }
 
-impl RateLimit {
-    pub fn new(max: u32, window: Duration) -> Self {
-        Self { max, window, current: Mutex::new((Instant::now(), 0)) }
+impl Default for Failures {
+    fn default() -> Self {
+        Self::new(10, Duration::from_mins(15), 10_000)
+    }
+}
+
+impl Failures {
+    pub fn new(max: u32, window: Duration, tracked: usize) -> Self {
+        Self { max, window, tracked, seen: Mutex::default() }
     }
 
-    pub fn allow(&self) -> bool {
-        let mut current = self.current.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if current.0.elapsed() >= self.window {
-            *current = (Instant::now(), 0);
+    fn seen(&self) -> std::sync::MutexGuard<'_, HashMap<Option<IpAddr>, (Instant, u32)>> {
+        self.seen.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub fn blocked(&self, address: Option<IpAddr>) -> bool {
+        let address = address.map(kagi::network);
+        self.seen()
+            .get(&address)
+            .is_some_and(|(since, count)| since.elapsed() < self.window && *count >= self.max)
+    }
+
+    pub fn record(&self, address: Option<IpAddr>) {
+        let address = address.map(kagi::network);
+        let mut seen = self.seen();
+        seen.retain(|_, (since, _)| since.elapsed() < self.window);
+        if seen.len() >= self.tracked && !seen.contains_key(&address) {
+            return;
         }
-        current.1 += 1;
-        current.1 <= self.max
+        seen.entry(address).or_insert_with(|| (Instant::now(), 0)).1 += 1;
     }
 }
 

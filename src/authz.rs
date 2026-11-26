@@ -50,7 +50,7 @@ fn split_outside_quotes(s: &str, sep: char) -> Vec<&str> {
 
 /// Envoy appends the peer it saw to `X-Forwarded-For`; anything before it is whatever the
 /// client sent, so the address is counted from the end.
-fn client_ip(headers: &HeaderMap, trusted_hops: usize) -> Option<String> {
+pub(crate) fn client_ip(headers: &HeaderMap, trusted_hops: usize) -> Option<String> {
     let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
     header("x-envoy-external-address").map(str::to_owned).or_else(|| {
         let entries: Vec<&str> = header("x-forwarded-for")?.split(',').map(str::trim).collect();

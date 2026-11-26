@@ -19,7 +19,7 @@ use crate::model::{
     AppRule, CertRecord, CertState, Device, DeviceView, EnrollmentRecord, RetiredCert, Seen, State,
 };
 use crate::rules::{clean_groups, normalize_host};
-use crate::util::{RateLimit, now, password, random_token};
+use crate::util::{now, password, random_token};
 
 pub struct Settings {
     pub public_url: Url,
@@ -61,12 +61,9 @@ pub struct App {
     seen: Mutex<HashMap<String, Seen>>,
     hosts_seen: Mutex<HashMap<String, OffsetDateTime>>,
     publish_lock: Mutex<()>,
-    pub(crate) login_starts: RateLimit,
 }
 
 const MAX_TRACKED_HOSTS: usize = 1000;
-/// Sign-in attempts one replica starts per second; anyone can call it.
-const LOGIN_STARTS_PER_SECOND: u32 = 5;
 
 pub type AppState = Arc<App>;
 
@@ -139,10 +136,6 @@ impl App {
             seen: Mutex::new(HashMap::new()),
             hosts_seen: Mutex::new(HashMap::new()),
             publish_lock: Mutex::new(()),
-            login_starts: RateLimit::new(
-                LOGIN_STARTS_PER_SECOND,
-                std::time::Duration::from_secs(1),
-            ),
         }
     }
 

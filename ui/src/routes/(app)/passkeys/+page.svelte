@@ -13,7 +13,7 @@
 		toasts
 	} from '@dorsk/tsumikit';
 	import { ApiError, api, type Passkey } from '#lib/api';
-	import { registerPasskey } from '#lib/webauthn';
+	import { registerPasskey } from '#lib/passkeys';
 
 	let passkeys = $state<Passkey[] | null>(null);
 	let loadError = $state('');

@@ -1,7 +1,7 @@
+use kagi::Passkey;
 use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
-use webauthn_rs::prelude::Passkey;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct State {
@@ -13,8 +13,6 @@ pub struct State {
     pub apps: Vec<AppRule>,
     #[serde(default)]
     pub sessions: Vec<SessionRecord>,
-    #[serde(default)]
-    pub ceremonies: Vec<CeremonyRecord>,
     #[serde(default)]
     pub enrollments: Vec<EnrollmentRecord>,
     /// Certs of deleted devices, kept until they expire so they stay refused.
@@ -34,7 +32,6 @@ pub struct RetiredCert {
 impl State {
     pub fn prune(&mut self, now: OffsetDateTime) {
         self.sessions.retain(|s| s.expires_at > now);
-        self.ceremonies.retain(|c| c.expires_at > now);
         self.enrollments.retain(|e| e.expires_at > now);
         self.retired.retain(|r| r.not_after > now);
     }
@@ -50,23 +47,6 @@ pub struct SessionRecord {
     pub passkey_id: Option<Uuid>,
     #[serde(with = "time::serde::rfc3339::option", default)]
     pub authenticated_at: Option<OffsetDateTime>,
-}
-
-/// A passkey ceremony between its start and finish requests, which may reach different
-/// replicas. The state never leaves the server.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CeremonyRecord {
-    pub id_hash: String,
-    pub registration: Option<RegistrationIntent>,
-    pub state: serde_json::Value,
-    #[serde(with = "time::serde::rfc3339")]
-    pub expires_at: OffsetDateTime,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RegistrationIntent {
-    pub name: String,
-    pub first: bool,
 }
 
 /// A one-shot install link. The bundles are encrypted with a password that is not stored.

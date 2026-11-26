@@ -3,13 +3,13 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum_extra::extract::CookieJar;
+use kagi::{PublicKeyCredential, RegisterPublicKeyCredential};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
-use webauthn_rs::prelude::{PublicKeyCredential, RegisterPublicKeyCredential};
 
 use crate::app::{AppState, Download};
-use crate::auth::{Admin, SESSION_COOKIE, is_signed_in};
+use crate::auth::{Admin, ClientAddress, SESSION_COOKIE, is_signed_in};
 use crate::error::{ApiError, ApiResult};
 use crate::rules::{Caller, CallerDevice, caller_device};
 
@@ -54,36 +54,47 @@ pub struct RegisterStart {
 
 pub async fn register_start(
     State(app): State<AppState>,
+    ClientAddress(address): ClientAddress,
     jar: CookieJar,
     Json(body): Json<RegisterStart>,
 ) -> ApiResult<impl IntoResponse> {
     let (jar, challenge) =
-        app.start_registration(jar, &body.name, body.setup_token.as_deref()).await?;
+        app.start_registration(jar, address, &body.name, body.setup_token.as_deref()).await?;
     Ok((jar, Json(challenge)))
+}
+
+#[derive(Deserialize)]
+pub struct RegisterFinish {
+    name: String,
+    credential: RegisterPublicKeyCredential,
 }
 
 pub async fn register_finish(
     State(app): State<AppState>,
+    ClientAddress(address): ClientAddress,
     jar: CookieJar,
-    Json(credential): Json<RegisterPublicKeyCredential>,
+    Json(body): Json<RegisterFinish>,
 ) -> ApiResult<impl IntoResponse> {
-    Ok((app.finish_registration(jar, &credential).await?, StatusCode::NO_CONTENT))
+    let jar = app.finish_registration(jar, address, &body.name, &body.credential).await?;
+    Ok((jar, StatusCode::NO_CONTENT))
 }
 
 pub async fn login_start(
     State(app): State<AppState>,
+    ClientAddress(address): ClientAddress,
     jar: CookieJar,
 ) -> ApiResult<impl IntoResponse> {
-    let (jar, challenge) = app.start_login(jar).await?;
+    let (jar, challenge) = app.start_login(jar, address).await?;
     Ok((jar, Json(challenge)))
 }
 
 pub async fn login_finish(
     State(app): State<AppState>,
+    ClientAddress(address): ClientAddress,
     jar: CookieJar,
     Json(credential): Json<PublicKeyCredential>,
 ) -> ApiResult<impl IntoResponse> {
-    Ok((app.finish_login(jar, &credential).await?, StatusCode::NO_CONTENT))
+    Ok((app.finish_login(jar, address, &credential).await?, StatusCode::NO_CONTENT))
 }
 
 pub async fn logout(State(app): State<AppState>, jar: CookieJar) -> impl IntoResponse {
@@ -118,10 +129,10 @@ pub async fn passkeys(State(app): State<AppState>, _: Admin) -> Json<Value> {
 
 pub async fn delete_passkey(
     State(app): State<AppState>,
-    _: Admin,
+    jar: CookieJar,
     Path(id): Path<Uuid>,
 ) -> ApiResult<StatusCode> {
-    app.delete_passkey(id).await?;
+    app.delete_passkey(&jar, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

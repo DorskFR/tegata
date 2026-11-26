@@ -18,7 +18,9 @@ proxy calling `/authz` can drop the endpoint first.
 
 With `TEGATA_BACKEND=openbao` certificates come from an OpenBao PKI role (the CA key never
 leaves OpenBao) and the state is one KV v2 secret written with check-and-set, so several
-replicas can share it. The role tegata uses needs:
+replicas can share it. Passkey ceremonies stay in the memory of the replica that started
+them, so with several replicas route each browser to one replica (cookie affinity) for at
+least the 5 minutes of a ceremony. The role tegata uses needs:
 
 ```hcl
 path "<pki>/issue/<role>" { capabilities = ["create", "update"] }
