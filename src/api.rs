@@ -102,7 +102,6 @@ pub async fn passkeys(State(app): State<AppState>, _: Admin) -> Json<Value> {
     let list: Vec<Value> = app
         .db
         .read()
-        .await
         .passkeys
         .iter()
         .map(|p| {
