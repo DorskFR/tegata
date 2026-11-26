@@ -142,10 +142,10 @@ impl Cli {
         };
         match written.await {
             Ok(()) => {
-                tracing::warn!(path = %path.display(), "no passkey registered yet: open the app and use the setup token in this file")
+                tracing::warn!(path = %path.display(), "no passkey registered yet: open the app and use the setup token in this file");
             }
             Err(err) => {
-                tracing::warn!(path = %path.display(), %err, "no passkey registered yet, and the setup token could not be written: set TEGATA_SETUP_TOKEN")
+                tracing::warn!(path = %path.display(), %err, "no passkey registered yet, and the setup token could not be written: set TEGATA_SETUP_TOKEN");
             }
         }
         if std::io::stderr().is_terminal() {
