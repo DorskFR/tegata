@@ -5,6 +5,6 @@
 </script>
 
 <a class="brand" href={resolve(to)} aria-label="tegata home">
-	<img src={asset('/favicon.svg')} alt="" />
+	<img src={asset('favicon.svg')} alt="" />
 	<span>tegata</span>
 </a>
