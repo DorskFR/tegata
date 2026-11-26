@@ -647,7 +647,7 @@ async fn replicas_share_sessions_links_and_rules() {
         .await;
     assert_eq!(status, StatusCode::OK, "{start}");
     b.db.refresh().await.unwrap();
-    assert_eq!(b.db.read().await.ceremonies.len(), 1, "passkey ceremonies are shared too");
+    assert_eq!(b.db.read().ceremonies.len(), 1, "passkey ceremonies are shared too");
 }
 
 #[tokio::test]
@@ -780,4 +780,169 @@ async fn unknown_enrollment_links_do_not_reload_the_store_per_request() {
     }
     let loads = store.loads.load(std::sync::atomic::Ordering::SeqCst) - before;
     assert!(loads <= 1, "40 unknown links and sessions cost {loads} store loads");
+}
+
+struct FlakyCa {
+    inner: Arc<dyn tegata::ca::Ca>,
+    failing: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl tegata::ca::Ca for FlakyCa {
+    async fn issue(
+        &self,
+        common_name: &str,
+        validity: time::Duration,
+    ) -> anyhow::Result<tegata::ca::Issued> {
+        self.inner.issue(common_name, validity).await
+    }
+
+    async fn revoke(&self, serial: &str) -> anyhow::Result<()> {
+        if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("CA unavailable");
+        }
+        self.inner.revoke(serial).await
+    }
+
+    async fn refresh_crl(&self) -> anyhow::Result<()> {
+        self.inner.refresh_crl().await
+    }
+
+    async fn crl_pem(&self) -> anyhow::Result<String> {
+        self.inner.crl_pem().await
+    }
+
+    fn ca_pem(&self) -> &str {
+        self.inner.ca_pem()
+    }
+
+    fn subject(&self) -> &str {
+        self.inner.subject()
+    }
+
+    fn not_after(&self) -> time::OffsetDateTime {
+        self.inner.not_after()
+    }
+}
+
+#[tokio::test]
+async fn failed_ca_revocations_keep_the_bundle_and_are_retried() {
+    let dir = std::env::temp_dir().join(format!("tegata-flaky-{}", uuid::Uuid::new_v4()));
+    let cli = <Cli as clap::Parser>::parse_from([
+        "tegata",
+        "--public-url",
+        ORIGIN,
+        "--backend",
+        "memory",
+        "--data-dir",
+        dir.to_str().unwrap(),
+    ]);
+    let mut app = cli.build().await.unwrap();
+    let ca = Arc::new(FlakyCa { inner: app.ca.clone(), failing: false.into() });
+    app.ca = ca.clone() as Arc<dyn tegata::ca::Ca>;
+    let app: Arc<App> = Arc::new(app);
+    let session = app.open_session(1).await.unwrap();
+    let h = Harness { app, dir, cookie: format!("tegata_session={session}") };
+    let crl = || async { crl_serials(&h.app.ca.crl_pem().await.unwrap()) };
+
+    let (_, created) = h.json("POST", "/api/devices", Some(json!({"name": "phone"}))).await;
+    let id = created["device"]["id"].as_str().unwrap().to_owned();
+    let (status, _, _) =
+        h.call("GET", &format!("/enroll/{}/device.p12", token_of(&created)), None, false).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, rotated) = h.json("POST", &format!("/api/devices/{id}/rotate"), Some(json!({}))).await;
+
+    ca.failing.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (status, bundle, _) =
+        h.call("GET", &format!("/enroll/{}/device.p12", token_of(&rotated)), None, false).await;
+    assert_eq!(status, StatusCode::OK, "the consumed link still hands out the bundle");
+    assert!(bundle.len() > 100, "a real PKCS#12 bundle");
+    let (status, _) = h.json("POST", &format!("/api/devices/{id}/revoke"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let serials: Vec<String> =
+        h.app.db.read().devices[0].certs.iter().map(|c| c.serial.clone()).collect();
+    assert_eq!(serials.len(), 2);
+    let published = crl().await;
+    assert!(serials.iter().all(|s| !published.contains(s)));
+    h.app.sweep().await.unwrap();
+    let published = crl().await;
+    assert!(serials.iter().all(|s| !published.contains(s)), "still failing");
+
+    ca.failing.store(false, std::sync::atomic::Ordering::SeqCst);
+    h.app.sweep().await.unwrap();
+    let published = crl().await;
+    assert!(serials.iter().all(|s| published.contains(s)), "the sweep retried both");
+    assert!(h.app.db.read().devices[0].certs.iter().all(|c| c.ca_revoked_at.is_some()));
+}
+
+fn passkey(name: &str) -> tegata::model::PasskeyRecord {
+    tegata::model::PasskeyRecord {
+        id: uuid::Uuid::new_v4(),
+        name: name.into(),
+        created_at: tegata::util::now(),
+        last_used_at: None,
+        passkey: serde_json::from_str(include_str!("fixtures/passkey.json")).unwrap(),
+    }
+}
+
+#[tokio::test]
+async fn deleting_a_passkey_ends_the_sessions_it_opened() {
+    let h = harness().await;
+    let (lost, kept) = (passkey("lost"), passkey("kept"));
+    let session = |token: &str, by: &tegata::model::PasskeyRecord| tegata::model::SessionRecord {
+        token_hash: tegata::util::sha256_hex(token.as_bytes()),
+        expires_at: tegata::util::now() + time::Duration::hours(1),
+        passkey_id: Some(by.id),
+    };
+    let records = [session("thief", &lost), session("owner", &kept)];
+    h.app
+        .db
+        .update(|s| {
+            s.passkeys.extend([lost.clone(), kept.clone()]);
+            s.sessions.extend(records.iter().cloned());
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
+        .unwrap();
+    let as_session = |token: &str| Harness {
+        app: h.app.clone(),
+        dir: std::env::temp_dir().join("tegata-unused"),
+        cookie: format!("tegata_session={token}"),
+    };
+    let (thief, owner) = (as_session("thief"), as_session("owner"));
+    assert_eq!(thief.json("GET", "/api/devices", None).await.0, StatusCode::OK);
+
+    let (status, _, _) =
+        owner.call("DELETE", &format!("/api/passkeys/{}", lost.id), None, true).await;
+    assert!(status.is_success(), "{status}");
+    assert_eq!(thief.json("GET", "/api/devices", None).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(owner.json("GET", "/api/devices", None).await.0, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn passkey_ceremonies_are_capped_and_sign_in_starts_rate_limited() {
+    let h = harness().await;
+    let key = passkey("key");
+    h.app
+        .db
+        .update(|s| {
+            s.passkeys.push(key.clone());
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
+        .unwrap();
+    for _ in 0..40 {
+        let (status, body) =
+            h.json("POST", "/api/auth/register/start", Some(json!({"name": "another"}))).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    assert_eq!(h.app.db.read().ceremonies.len(), 32, "the oldest ceremonies give way");
+
+    let mut statuses = Vec::new();
+    for _ in 0..20 {
+        statuses.push(h.call("POST", "/api/auth/login/start", None, false).await.0);
+    }
+    assert!(statuses.iter().filter(|s| **s == StatusCode::OK).count() <= 10, "{statuses:?}");
+    assert!(statuses.contains(&StatusCode::TOO_MANY_REQUESTS), "{statuses:?}");
+    assert_eq!(h.app.db.read().ceremonies.len(), 32);
 }

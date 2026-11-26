@@ -18,6 +18,8 @@ use crate::util::{now, random_token, sha256_hex};
 pub const SESSION_COOKIE: &str = "tegata_session";
 const CHALLENGE_COOKIE: &str = "tegata_challenge";
 const CHALLENGE_TTL: Duration = Duration::minutes(5);
+/// Ceremonies kept in the shared state; the oldest gives way beyond this.
+const MAX_CEREMONIES: usize = 32;
 
 pub struct Auth {
     webauthn: Webauthn,
@@ -76,13 +78,13 @@ impl App {
             let t = now();
             s.sessions.iter().any(|x| x.token_hash == hash && x.expires_at > t)
         };
-        if found(&self.db.read().await) {
+        if found(self.db.read().as_ref()) {
             return true;
         }
         if let Err(err) = self.db.refresh_on_miss().await {
             tracing::warn!(error = ?err, "refreshing state failed");
         }
-        found(&self.db.read().await)
+        found(self.db.read().as_ref())
     }
 
     pub async fn end_session(&self, token: &str) -> ApiResult<()> {
@@ -99,14 +101,15 @@ impl App {
     /// Opens a session without a passkey ceremony; for tests and tooling, never routed.
     #[doc(hidden)]
     pub async fn open_session(&self, hours: u32) -> ApiResult<String> {
-        self.new_session(hours).await
+        self.new_session(hours, None).await
     }
 
-    async fn new_session(&self, hours: u32) -> ApiResult<String> {
+    async fn new_session(&self, hours: u32, passkey_id: Option<Uuid>) -> ApiResult<String> {
         let token = random_token();
         let record = SessionRecord {
             token_hash: sha256_hex(token.as_bytes()),
             expires_at: now() + Duration::hours(i64::from(hours)),
+            passkey_id,
         };
         self.db
             .update(|s| {
@@ -133,6 +136,8 @@ impl App {
         self.db
             .update(|s| {
                 s.prune(now());
+                let excess = (s.ceremonies.len() + 1).saturating_sub(MAX_CEREMONIES);
+                s.ceremonies = s.ceremonies.split_off(excess);
                 s.ceremonies.push(record.clone());
                 Ok::<_, ApiError>(())
             })
@@ -168,7 +173,7 @@ impl App {
         name: &str,
         setup_token: Option<&str>,
     ) -> ApiResult<(CookieJar, CreationChallengeResponse)> {
-        let state = self.db.read().await;
+        let state = self.db.read();
         let first = state.passkeys.is_empty();
         if first {
             let given = setup_token.unwrap_or_default().trim();
@@ -221,13 +226,14 @@ impl App {
             .webauthn
             .finish_passkey_registration(credential, &state)
             .map_err(webauthn_error)?;
+        let id = Uuid::new_v4();
         self.db
             .update(|s| {
                 if reg.first && !s.passkeys.is_empty() {
                     return Err(ApiError::Conflict("setup was already completed".into()));
                 }
                 s.passkeys.push(PasskeyRecord {
-                    id: Uuid::new_v4(),
+                    id,
                     name: reg.name.clone(),
                     created_at: now(),
                     last_used_at: None,
@@ -239,7 +245,7 @@ impl App {
         tracing::info!(name = %reg.name, "passkey registered");
         let jar = jar.remove(Cookie::build(CHALLENGE_COOKIE).path("/"));
         if reg.first {
-            let token = self.new_session(self.settings.session_hours).await?;
+            let token = self.new_session(self.settings.session_hours, Some(id)).await?;
             return Ok(jar.add(self.session_cookie(token)));
         }
         Ok(jar)
@@ -258,8 +264,10 @@ impl App {
         &self,
         jar: CookieJar,
     ) -> ApiResult<(CookieJar, RequestChallengeResponse)> {
-        let passkeys: Vec<_> =
-            self.db.read().await.passkeys.into_iter().map(|p| p.passkey).collect();
+        if !self.login_starts.allow() {
+            return Err(ApiError::TooManyRequests("too many sign-in attempts, try again".into()));
+        }
+        let passkeys: Vec<_> = self.db.read().passkeys.iter().map(|p| p.passkey.clone()).collect();
         if passkeys.is_empty() {
             return Err(ApiError::Conflict("no passkey is registered yet".into()));
         }
@@ -297,11 +305,12 @@ impl App {
                     .ok_or_else(|| ApiError::Forbidden("passkey is not registered".into()))?;
                 record.passkey.update_credential(&result);
                 record.last_used_at = Some(now());
-                Ok::<_, ApiError>(record.name.clone())
+                Ok::<_, ApiError>((record.id, record.name.clone()))
             })
             .await?;
+        let (id, name) = name;
         tracing::info!(passkey = %name, "signed in");
-        let token = self.new_session(self.settings.session_hours).await?;
+        let token = self.new_session(self.settings.session_hours, Some(id)).await?;
         Ok(jar.remove(Cookie::build(CHALLENGE_COOKIE).path("/")).add(self.session_cookie(token)))
     }
 
@@ -315,6 +324,7 @@ impl App {
                     return Err(ApiError::Conflict("the last passkey cannot be removed".into()));
                 }
                 s.passkeys.retain(|p| p.id != id);
+                s.sessions.retain(|x| x.passkey_id != Some(id));
                 Ok(())
             })
             .await

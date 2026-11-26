@@ -97,7 +97,9 @@ wins over an identity with the same fingerprint.
 ## Per-app access
 
 Every host seen on `/authz` shows up on the Apps page. The host is the check request's
-`Host`, which Envoy sets from the original request; `X-Forwarded-Host` is ignored. An app is open to every valid
+`Host`, which Envoy sets from the original request; `X-Forwarded-Host` is ignored.
+Allowed requests carry the device or identity name in `x-tegata-device`, with `%` and
+every byte outside printable ASCII percent-encoded. An app is open to every valid
 device until you restrict it to one or more groups; then only devices in one of those
 groups pass. tegata refuses a change that would lock the current browser's certificate
 out of tegata itself unless you confirm it. The API is in [api.md](api.md#apps).

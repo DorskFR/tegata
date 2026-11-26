@@ -200,7 +200,7 @@ impl Cli {
         let identities = Identities::open(self.service_identities.clone())?;
         let auth = Auth::new(&settings.public_url, &settings.rp_name)?;
         let db = Db::open(store).await?;
-        if db.read().await.passkeys.is_empty() && self.setup_token.is_none() {
+        if db.read().passkeys.is_empty() && self.setup_token.is_none() {
             tracing::warn!(setup_token = %settings.setup_token, "no passkey registered yet: open the app and use this setup token");
         }
         Ok(App::new(settings, db, ca, auth, trust, identities))

@@ -6,6 +6,7 @@ COPY ui/ ./
 RUN npm run build
 
 FROM rust:1.99-slim-trixie AS server
+ARG CARGO_BUILD_JOBS
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src/ src/

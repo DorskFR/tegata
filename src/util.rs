@@ -1,3 +1,7 @@
+use std::path::Path;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use sha2::{Digest, Sha256};
@@ -37,6 +41,47 @@ pub fn normalize_serial(serial: &str) -> String {
     let trimmed = hex.trim_start_matches('0');
     let padded = if trimmed.len() % 2 == 1 { format!("0{trimmed}") } else { trimmed.to_owned() };
     hex::decode(&padded).map(|b| format_serial(&b)).unwrap_or(padded)
+}
+
+/// At most `max` events per `window`, counted in fixed windows.
+pub struct RateLimit {
+    max: u32,
+    window: Duration,
+    current: Mutex<(Instant, u32)>,
+}
+
+impl RateLimit {
+    pub fn new(max: u32, window: Duration) -> Self {
+        Self { max, window, current: Mutex::new((Instant::now(), 0)) }
+    }
+
+    pub fn allow(&self) -> bool {
+        let mut current = self.current.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if current.0.elapsed() >= self.window {
+            *current = (Instant::now(), 0);
+        }
+        current.1 += 1;
+        current.1 <= self.max
+    }
+}
+
+/// Replaces `path` through a synced temp file, so a crash leaves either the old or the new
+/// content. The file is created with `mode` on unix, never wider.
+pub async fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let tmp = path.with_extension("tmp");
+    let _ = tokio::fs::remove_file(&tmp).await;
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(mode);
+    #[cfg(not(unix))]
+    let _ = mode;
+    let mut file = options.open(&tmp).await?;
+    file.write_all(bytes).await?;
+    file.sync_all().await?;
+    drop(file);
+    tokio::fs::rename(&tmp, path).await
 }
 
 #[cfg(test)]

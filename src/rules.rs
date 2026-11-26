@@ -143,14 +143,14 @@ impl App {
         Ok(out)
     }
 
-    pub async fn apps(&self) -> Vec<AppRule> {
-        let mut apps = self.db.read().await.apps;
+    pub fn apps(&self) -> Vec<AppRule> {
+        let mut apps = self.db.read().apps.clone();
         apps.sort_by(|a, b| a.host.cmp(&b.host));
         apps
     }
 
-    pub async fn groups(&self) -> Vec<String> {
-        let state = self.db.read().await;
+    pub fn groups(&self) -> Vec<String> {
+        let state = self.db.read();
         let mut all: Vec<String> = state
             .devices
             .iter()
