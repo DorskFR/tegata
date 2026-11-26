@@ -1,3 +1,5 @@
+<img src="docs/assets/icon.svg" width="64" height="64" alt="">
+
 # tegata
 
 Web UI that mints, installs, rotates and revokes mTLS client certificates for devices.
