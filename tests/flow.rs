@@ -1039,7 +1039,9 @@ async fn rejected_sign_ins_throttle_only_their_address() {
     let h = harness().await;
     with_passkey(&h, &passkey("key")).await;
     let attacker = "198.51.100.66";
-    for _ in 0..10 {
+    let (_, _, headers) = h.browser(attacker, "", "POST", "/api/auth/login/start", None).await;
+    let spare = challenge_cookie(&headers);
+    for attempt in 0..10 {
         let (status, _, headers) =
             h.browser(attacker, "", "POST", "/api/auth/login/start", None).await;
         assert_eq!(status, StatusCode::OK);
@@ -1048,13 +1050,25 @@ async fn rejected_sign_ins_throttle_only_their_address() {
             .browser(attacker, &cookie, "POST", "/api/auth/login/finish", Some(forged_assertion()))
             .await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-        let (status, _, _) = h
-            .browser(attacker, &cookie, "POST", "/api/auth/login/finish", Some(forged_assertion()))
-            .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "a ceremony is used once");
+        if attempt == 0 {
+            let (status, _, _) = h
+                .browser(
+                    attacker,
+                    &cookie,
+                    "POST",
+                    "/api/auth/login/finish",
+                    Some(forged_assertion()),
+                )
+                .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "a ceremony is used once");
+        }
     }
     let (status, _, _) = h.browser(attacker, "", "POST", "/api/auth/login/start", None).await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    let (status, _, _) = h
+        .browser(attacker, &spare, "POST", "/api/auth/login/finish", Some(forged_assertion()))
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "a ceremony opened earlier is throttled too");
     let (status, _, _) = h.browser("203.0.113.5", "", "POST", "/api/auth/login/start", None).await;
     assert_eq!(status, StatusCode::OK, "the admin's address is not throttled");
 }
@@ -1102,6 +1116,38 @@ async fn a_registration_finishes_only_in_the_session_that_started_it() {
         h.browser("203.0.113.5", &theirs, "POST", "/api/auth/register/finish", Some(finish)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(h.app.db.read().passkeys.len(), 1);
+}
+
+#[tokio::test]
+async fn a_registration_finishes_only_while_the_sign_in_is_recent() {
+    let h = harness().await;
+    with_passkey(&h, &passkey("key")).await;
+    let (status, _, headers) = h
+        .browser(
+            "203.0.113.5",
+            &h.cookie,
+            "POST",
+            "/api/auth/register/start",
+            Some(json!({"name": "new"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    h.app
+        .db
+        .update(|s| {
+            for session in &mut s.sessions {
+                session.authenticated_at = Some(tegata::util::now() - time::Duration::minutes(6));
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
+        .unwrap();
+    let cookies = format!("{}; {}", h.cookie, challenge_cookie(&headers));
+    let finish = json!({"name": "new", "credential": forged_attestation()});
+    let (status, body, _) =
+        h.browser("203.0.113.5", &cookies, "POST", "/api/auth/register/finish", Some(finish)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("sign in again"), "{body}");
 }
 
 #[tokio::test]

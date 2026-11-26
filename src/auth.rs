@@ -1,8 +1,8 @@
 use std::future::{Future, ready};
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::SystemTime;
 
-use axum::extract::FromRequestParts;
+use axum::extract::{ConnectInfo, FromRequestParts};
 use axum::http::request::Parts;
 use axum_extra::extract::CookieJar;
 use axum_extra::extract::cookie::{Cookie, SameSite};
@@ -93,8 +93,11 @@ impl CredentialStore for Passkeys<'_> {
         self.app
             .db
             .update(|s| {
+                if s.passkeys.iter().any(|p| p.passkey.cred_id() == record.passkey.cred_id()) {
+                    return Err(ApiError::Conflict("this passkey is already registered".into()));
+                }
                 s.passkeys.push(record.clone());
-                Ok::<_, ApiError>(())
+                Ok(())
             })
             .await?;
         Ok(id)
@@ -104,7 +107,9 @@ impl CredentialStore for Passkeys<'_> {
         self.app
             .db
             .update(|s| {
-                if let Some(record) = s.passkeys.iter_mut().find(|p| p.id == *id) {
+                if let Some(record) = s.passkeys.iter_mut().find(|p| p.id == *id)
+                    && counter(passkey) >= counter(&record.passkey)
+                {
                     record.passkey = passkey.clone();
                 }
                 Ok(())
@@ -130,6 +135,14 @@ impl CredentialStore for Passkeys<'_> {
     }
 }
 
+/// The signature counter, which webauthn-rs only exposes through its serde form.
+fn counter(passkey: &Passkey) -> u64 {
+    serde_json::to_value(passkey)
+        .ok()
+        .and_then(|v| v["cred"]["counter"].as_u64())
+        .unwrap_or_default()
+}
+
 /// The client address the gateway saw, if tegata sits behind one.
 pub struct ClientAddress(pub Option<IpAddr>);
 
@@ -140,8 +153,10 @@ impl FromRequestParts<AppState> for ClientAddress {
         parts: &mut Parts,
         app: &AppState,
     ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
-        let ip = crate::authz::client_ip(&parts.headers, app.settings.trusted_hops);
-        ready(Ok(Self(ip.and_then(|ip| ip.parse().ok()))))
+        let forwarded = crate::authz::forwarded_ip(&parts.headers, app.settings.trusted_hops)
+            .and_then(|ip| ip.parse().ok());
+        let peer = || parts.extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip());
+        ready(Ok(Self(forwarded.or_else(peer))))
     }
 }
 
@@ -233,6 +248,15 @@ impl App {
         let hash = sha256_hex(token.as_bytes());
         let session = self.db.read().sessions.iter().find(|s| s.token_hash == hash).cloned();
         session.ok_or(ApiError::Unauthorized)
+    }
+
+    fn require_step_up(session: &SessionRecord) -> ApiResult<()> {
+        let age = |at: time::OffsetDateTime| (now() - at).unsigned_abs();
+        if session.authenticated_at.is_some_and(|at| age(at) <= STEP_UP) {
+            Ok(())
+        } else {
+            Err(step_up_refused())
+        }
     }
 
     fn sign_in_proof(session: &SessionRecord) -> Proof {
@@ -340,6 +364,7 @@ impl App {
             return self.finish_setup(jar, address, &ceremony, name, credential).await;
         }
         let session = self.signed_in(&jar).await?;
+        Self::require_step_up(&session)?;
         let store = self.passkeys(session.passkey_id);
         self.auth
             .kagi
@@ -422,6 +447,7 @@ impl App {
         address: Option<IpAddr>,
         credential: &PublicKeyCredential,
     ) -> ApiResult<CookieJar> {
+        self.throttle(address)?;
         let ceremony = challenge_id(&jar)?;
         let signed_in = self
             .auth
@@ -450,11 +476,7 @@ impl App {
     /// Needs the same recent sign-in as adding one, then ends the sessions it opened.
     pub async fn delete_passkey(&self, jar: &CookieJar, id: Uuid) -> ApiResult<()> {
         let session = self.signed_in(jar).await?;
-        let recent =
-            session.authenticated_at.is_some_and(|at| (now() - at).unsigned_abs() <= STEP_UP);
-        if !recent {
-            return Err(step_up_refused());
-        }
+        Self::require_step_up(&session)?;
         let removed = self
             .auth
             .kagi
@@ -478,5 +500,50 @@ impl FromRequestParts<AppState> for Admin {
     ) -> Result<Self, Self::Rejection> {
         let jar = CookieJar::from_headers(&parts.headers);
         if is_signed_in(app, &jar).await { Ok(Self) } else { Err(ApiError::Unauthorized) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    fn with_counter(passkey: &Passkey, counter: u64) -> Passkey {
+        let mut value = serde_json::to_value(passkey).unwrap();
+        value["cred"]["counter"] = counter.into();
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_stored_counter_never_goes_back_and_a_credential_is_stored_once() {
+        let dir = std::env::temp_dir().join(format!("tegata-auth-{}", Uuid::new_v4()));
+        let cli = crate::config::Cli::parse_from([
+            "tegata",
+            "--public-url",
+            "https://tegata.test",
+            "--backend",
+            "memory",
+            "--data-dir",
+            dir.to_str().unwrap(),
+            "--setup-token",
+            "setup",
+        ]);
+        let app = cli.build().await.unwrap();
+        let store = app.passkeys(None);
+        let fixture: Passkey =
+            serde_json::from_str(include_str!("../tests/fixtures/passkey.json")).unwrap();
+        let id = store.add(&(), &with_counter(&fixture, 10), "key").await.unwrap();
+        let stored = || counter(&app.db.read().passkeys[0].passkey);
+
+        store.update(&id, &with_counter(&fixture, 3)).await.unwrap();
+        assert_eq!(stored(), 10, "a stale replica cannot roll the counter back");
+        store.update(&id, &with_counter(&fixture, 11)).await.unwrap();
+        assert_eq!(stored(), 11);
+
+        let again = store.add(&(), &fixture, "copy").await;
+        assert!(matches!(again, Err(ApiError::Conflict(_))), "{again:?}");
+        assert_eq!(app.db.read().passkeys.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

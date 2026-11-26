@@ -32,8 +32,11 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(listen).await?;
     let authz_listener = tokio::net::TcpListener::bind(authz_listen).await?;
     tracing::info!(%listen, %authz_listen, public_url = %app.settings.public_url, "tegata listening");
-    let public =
-        axum::serve(listener, tegata::router(app.clone())).with_graceful_shutdown(shutdown());
+    let public = axum::serve(
+        listener,
+        tegata::router(app.clone()).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown());
     let authz =
         axum::serve(authz_listener, tegata::authz_router(app)).with_graceful_shutdown(shutdown());
     tokio::try_join!(public.into_future(), authz.into_future())?;
