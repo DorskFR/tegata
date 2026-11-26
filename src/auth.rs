@@ -18,6 +18,8 @@ use crate::util::{now, random_token, sha256_hex};
 pub const SESSION_COOKIE: &str = "tegata_session";
 const CHALLENGE_COOKIE: &str = "tegata_challenge";
 const CHALLENGE_TTL: Duration = Duration::minutes(5);
+/// Adding a passkey needs a sign-in this recent, so a session cookie alone is not enough.
+const STEP_UP: Duration = Duration::minutes(5);
 /// Ceremonies kept in the shared state; the oldest gives way beyond this.
 const MAX_CEREMONIES: usize = 32;
 
@@ -71,6 +73,22 @@ fn internal(err: impl std::fmt::Display) -> ApiError {
 }
 
 impl App {
+    async fn recent_sign_in(&self, jar: &CookieJar) -> ApiResult<SessionRecord> {
+        let token = jar.get(SESSION_COOKIE).ok_or(ApiError::Unauthorized)?.value().to_owned();
+        if !self.session_valid(&token).await {
+            return Err(ApiError::Unauthorized);
+        }
+        let hash = sha256_hex(token.as_bytes());
+        let session = self.db.read().sessions.iter().find(|s| s.token_hash == hash).cloned();
+        let session = session.ok_or(ApiError::Unauthorized)?;
+        if session.authenticated_at.is_none_or(|at| now() - at > STEP_UP) {
+            return Err(ApiError::Forbidden(
+                "sign out and sign in again with a passkey to add another one".into(),
+            ));
+        }
+        Ok(session)
+    }
+
     /// Checks the cached state, then the store, since another replica may have opened it.
     pub async fn session_valid(&self, token: &str) -> bool {
         let hash = sha256_hex(token.as_bytes());
@@ -110,6 +128,7 @@ impl App {
             token_hash: sha256_hex(token.as_bytes()),
             expires_at: now() + Duration::hours(i64::from(hours)),
             passkey_id,
+            authenticated_at: Some(now()),
         };
         self.db
             .update(|s| {
@@ -176,12 +195,13 @@ impl App {
         let state = self.db.read();
         let first = state.passkeys.is_empty();
         if first {
-            let given = setup_token.unwrap_or_default().trim();
-            if sha256_hex(given.as_bytes()) != sha256_hex(self.settings.setup_token.as_bytes()) {
+            let given = setup_token.map(str::trim).filter(|t| !t.is_empty());
+            let expected = sha256_hex(self.settings.setup_token.as_bytes());
+            if given.is_none_or(|t| sha256_hex(t.as_bytes()) != expected) {
                 return Err(ApiError::Forbidden("setup token does not match".into()));
             }
-        } else if !is_signed_in(self, &jar).await {
-            return Err(ApiError::Unauthorized);
+        } else {
+            self.recent_sign_in(&jar).await?;
         }
         let name = name.trim();
         if name.is_empty() || name.chars().count() > 64 {
@@ -218,9 +238,7 @@ impl App {
             .ok_or_else(|| ApiError::bad_request("passkey ceremony expired, try again"))?;
         let state: PasskeyRegistration =
             serde_json::from_value(ceremony.state).map_err(internal)?;
-        if !reg.first && !is_signed_in(self, &jar).await {
-            return Err(ApiError::Unauthorized);
-        }
+        let added_by = if reg.first { None } else { self.recent_sign_in(&jar).await?.passkey_id };
         let passkey = self
             .auth
             .webauthn
@@ -237,12 +255,17 @@ impl App {
                     name: reg.name.clone(),
                     created_at: now(),
                     last_used_at: None,
+                    added_by,
                     passkey: passkey.clone(),
                 });
                 Ok(())
             })
             .await?;
-        tracing::info!(name = %reg.name, "passkey registered");
+        if reg.first {
+            tracing::info!(name = %reg.name, "first passkey registered");
+        } else {
+            tracing::warn!(name = %reg.name, ?added_by, "passkey added");
+        }
         let jar = jar.remove(Cookie::build(CHALLENGE_COOKIE).path("/"));
         if reg.first {
             let token = self.new_session(self.settings.session_hours, Some(id)).await?;

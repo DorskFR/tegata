@@ -54,18 +54,38 @@ headers:
     mode: SanitizeSet
 ```
 
-Route `/enroll/`, `/api/enroll/` and `/_app/` without a certificate requirement and
-everything else with one. To enable last seen and instant revocation, add `extAuth`
-to the `SecurityPolicy` of any route you protect:
+`VerifyIfGiven` lets connections without a certificate through TLS, so that new devices
+can reach `/enroll/`, `/api/enroll/` and `/_app/`. Every other route must require one
+itself, for example with a `SecurityPolicy` rule:
+
+```yaml
+authorization:
+  defaultAction: Deny
+  rules:
+    - name: client-cert
+      action: Allow
+      cel: connection.mtls         # a verified client certificate was presented
+```
+
+Apps that never serve enrollment are simpler on their own listener with the default
+`clientValidation` mode, which refuses connections without a certificate.
+
+To enable last seen, app rules and instant revocation, add `extAuth` to the
+`SecurityPolicy` of any route you protect:
 
 ```yaml
 extAuth:
-  failOpen: true                   # the CRL still applies if tegata is down
+  failOpen: false                  # tegata down means refused, not allowed
   headersToExtAuth: [x-forwarded-client-cert, x-forwarded-for, user-agent]
   http:
     backendRefs: [{ name: tegata, namespace: <ns>, port: 8081 }]
     path: /authz
 ```
+
+With `failOpen: true`, requests are let through whenever `/authz` errors or times out.
+Only the CRL still applies then: app restrictions, superseded certificates and
+revocations the CA has not confirmed yet are not enforced. Without a certificate
+requirement on the route, connections without any certificate get through too.
 
 Port 8081 (`TEGATA_AUTHZ_LISTEN`) only serves `/authz`; keep it off public routes.
 While migrating from another CA, `TEGATA_AUTHZ_ALLOW_UNKNOWN=true` lets certificates

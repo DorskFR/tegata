@@ -1,7 +1,7 @@
 use std::fmt::Write;
 
 use axum::extract::State;
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 
 use crate::app::{AppState, AuthzDecision, DenyReason};
@@ -48,22 +48,33 @@ fn split_outside_quotes(s: &str, sep: char) -> Vec<&str> {
     parts
 }
 
-fn client_ip(headers: &HeaderMap) -> Option<String> {
+/// Envoy appends the peer it saw to `X-Forwarded-For`; anything before it is whatever the
+/// client sent, so the address is counted from the end.
+fn client_ip(headers: &HeaderMap, trusted_hops: usize) -> Option<String> {
     let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
     header("x-envoy-external-address").map(str::to_owned).or_else(|| {
-        header("x-forwarded-for").and_then(|v| v.split(',').next()).map(|v| v.trim().to_owned())
+        let entries: Vec<&str> = header("x-forwarded-for")?.split(',').map(str::trim).collect();
+        let at = entries.len().checked_sub(1 + trusted_hops)?;
+        Some(entries[at].to_owned()).filter(|ip| !ip.is_empty())
     })
 }
 
-pub async fn check(State(app): State<AppState>, headers: HeaderMap) -> Response {
+pub async fn check(State(app): State<AppState>, uri: Uri, headers: HeaderMap) -> Response {
+    if !app.state_is_fresh() {
+        tracing::error!(age = ?app.db.state_age(), "refusing checks: the state could not be reloaded");
+        return (StatusCode::SERVICE_UNAVAILABLE, "tegata state is stale").into_response();
+    }
     let xfcc = headers.get("x-forwarded-client-cert").and_then(|v| v.to_str().ok());
     let hash = xfcc.and_then(xfcc_hash);
     let user_agent = headers
         .get("user-agent")
         .and_then(|v| v.to_str().ok())
         .map(|ua| ua.chars().take(256).collect());
-    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
-    let ip = client_ip(&headers);
+    let host = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| uri.authority().map(axum::http::uri::Authority::as_str));
+    let ip = client_ip(&headers, app.settings.trusted_hops);
     match app.authorize(hash.as_deref(), host, ip.clone(), user_agent.clone()).await {
         AuthzDecision::AllowUnknown => {
             tracing::info!(
@@ -183,6 +194,20 @@ mod tests {
         );
         assert_eq!(xfcc_cn("Hash=ab"), None);
         assert_eq!(xfcc_cn(r#"Hash=ab;Subject="O=no cn""#), None);
+    }
+
+    #[test]
+    fn client_ip_is_counted_from_the_end() {
+        let xff = |v: &str| {
+            let mut h = HeaderMap::new();
+            h.insert("x-forwarded-for", HeaderValue::from_str(v).unwrap());
+            h
+        };
+        let spoofed = xff("198.51.100.1, 203.0.113.7");
+        assert_eq!(client_ip(&spoofed, 0).as_deref(), Some("203.0.113.7"));
+        assert_eq!(client_ip(&spoofed, 1).as_deref(), Some("198.51.100.1"));
+        assert_eq!(client_ip(&spoofed, 2), None);
+        assert_eq!(client_ip(&xff("203.0.113.7"), 0).as_deref(), Some("203.0.113.7"));
     }
 
     #[test]

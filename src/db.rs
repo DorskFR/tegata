@@ -21,6 +21,8 @@ pub struct Db {
     writer: Mutex<()>,
     /// When the last completed load started.
     loaded_at: Mutex<Instant>,
+    /// When a load or save last succeeded.
+    confirmed_at: std::sync::Mutex<Instant>,
 }
 
 impl Db {
@@ -32,7 +34,19 @@ impl Db {
             snapshot: RwLock::new((Arc::new(state), version)),
             writer: Mutex::new(()),
             loaded_at: Mutex::new(started),
+            confirmed_at: std::sync::Mutex::new(started),
         })
+    }
+
+    /// How long since the store last answered a load or save.
+    pub fn state_age(&self) -> Duration {
+        self.confirmed_at.lock().unwrap_or_else(std::sync::PoisonError::into_inner).elapsed()
+    }
+
+    fn confirm(&self, at: Instant) {
+        let mut confirmed =
+            self.confirmed_at.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *confirmed = (*confirmed).max(at);
     }
 
     pub fn read(&self) -> Arc<State> {
@@ -74,7 +88,9 @@ impl Db {
 
     async fn load_newer(&self) -> anyhow::Result<()> {
         let _writer = self.writer.lock().await;
+        let started = Instant::now();
         let (state, version) = self.store.load().await?;
+        self.confirm(started);
         let newer = match (version, self.current().1) {
             (Some(new), Some(old)) => new > old,
             _ => true,
@@ -96,13 +112,17 @@ impl Db {
         for _ in 0..3 {
             let mut next = State::clone(&*base);
             let out = f(&mut next)?;
+            let started = Instant::now();
             match self.store.save(&next, version).await {
                 Ok(saved) => {
+                    self.confirm(started);
                     self.commit((Arc::new(next), version.map(|_| saved)));
                     return Ok(out);
                 }
                 Err(SaveError::Conflict) => {
+                    let started = Instant::now();
                     let (state, loaded) = self.store.load().await?;
+                    self.confirm(started);
                     (base, version) = (Arc::new(state), loaded);
                     self.commit((base.clone(), version));
                 }
@@ -149,6 +169,7 @@ mod tests {
             token_hash: "x".into(),
             expires_at: crate::util::now(),
             passkey_id: None,
+            authenticated_at: None,
         });
         store.save(&state, Some(0)).await.unwrap();
 
@@ -208,6 +229,7 @@ mod tests {
             token_hash: hash.into(),
             expires_at: crate::util::now() + time::Duration::hours(1),
             passkey_id: None,
+            authenticated_at: None,
         }
     }
 

@@ -881,6 +881,7 @@ fn passkey(name: &str) -> tegata::model::PasskeyRecord {
         name: name.into(),
         created_at: tegata::util::now(),
         last_used_at: None,
+        added_by: None,
         passkey: serde_json::from_str(include_str!("fixtures/passkey.json")).unwrap(),
     }
 }
@@ -893,6 +894,7 @@ async fn deleting_a_passkey_ends_the_sessions_it_opened() {
         token_hash: tegata::util::sha256_hex(token.as_bytes()),
         expires_at: tegata::util::now() + time::Duration::hours(1),
         passkey_id: Some(by.id),
+        authenticated_at: Some(tegata::util::now()),
     };
     let records = [session("thief", &lost), session("owner", &kept)];
     h.app
@@ -945,4 +947,160 @@ async fn passkey_ceremonies_are_capped_and_sign_in_starts_rate_limited() {
     assert!(statuses.iter().filter(|s| **s == StatusCode::OK).count() <= 10, "{statuses:?}");
     assert!(statuses.contains(&StatusCode::TOO_MANY_REQUESTS), "{statuses:?}");
     assert_eq!(h.app.db.read().ceremonies.len(), 32);
+}
+
+fn cli_with(dir: &std::path::Path, extra: &[&str]) -> Cli {
+    let mut args = vec!["tegata", "--public-url", ORIGIN, "--backend", "memory", "--data-dir"];
+    args.push(dir.to_str().unwrap());
+    args.extend_from_slice(extra);
+    <Cli as clap::Parser>::parse_from(args)
+}
+
+fn temp_dir(label: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("tegata-{label}-{}", uuid::Uuid::new_v4()))
+}
+
+#[tokio::test]
+async fn the_setup_token_cannot_be_empty_and_is_never_logged() {
+    for empty in ["", "  "] {
+        let dir = temp_dir("empty-token");
+        let built = cli_with(&dir, &["--setup-token", empty]).build().await;
+        assert!(built.is_err(), "an empty setup token refuses to start");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    let h = harness().await;
+    for body in [json!({"name": "x"}), json!({"name": "x", "setup_token": " "})] {
+        let (status, _) = h.json("POST", "/api/auth/register/start", Some(body)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "a missing token never matches");
+    }
+
+    let dir = temp_dir("generated-token");
+    let app = cli_with(&dir, &[]).build().await.unwrap();
+    let path = dir.join("setup-token");
+    let written = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(written.trim(), app.settings.setup_token);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn adding_a_passkey_needs_a_recent_sign_in() {
+    let h = harness().await;
+    let key = passkey("key");
+    let stale = tegata::model::SessionRecord {
+        token_hash: tegata::util::sha256_hex(b"stale"),
+        expires_at: tegata::util::now() + time::Duration::hours(1),
+        passkey_id: Some(key.id),
+        authenticated_at: Some(tegata::util::now() - time::Duration::minutes(10)),
+    };
+    h.app
+        .db
+        .update(|s| {
+            s.passkeys.push(key.clone());
+            s.sessions.push(stale.clone());
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
+        .unwrap();
+    let old = Harness {
+        app: h.app.clone(),
+        dir: temp_dir("unused"),
+        cookie: "tegata_session=stale".into(),
+    };
+    assert_eq!(old.json("GET", "/api/devices", None).await.0, StatusCode::OK, "still signed in");
+    let start = json!({"name": "attacker key"});
+    let (status, _) = old.json("POST", "/api/auth/register/start", Some(start.clone())).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = h.json("POST", "/api/auth/register/start", Some(start)).await;
+    assert_eq!(status, StatusCode::OK, "a fresh sign-in may add a passkey");
+}
+
+#[tokio::test]
+async fn checks_without_a_host_fail_closed_once_an_app_is_restricted() {
+    let h = harness().await;
+    let admin = installed(&h, "laptop", &["admin"]).await;
+    let kid = installed(&h, "tablet", &["family"]).await;
+    assert_eq!(h.authz(&kid).await, StatusCode::OK, "nothing is restricted yet");
+    h.json("POST", "/api/apps", Some(json!({"host": "nas.example.com"}))).await;
+    let rule = json!({"restricted": true, "groups": ["admin"]});
+    let (status, _) = h.json("PUT", "/api/apps/nas.example.com", Some(rule)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    assert_eq!(h.authz(&kid).await, StatusCode::FORBIDDEN, "no host, no free pass");
+    let h2 = "http://nas.example.com/authz/";
+    assert_eq!(h.authz_at(h2, &kid).await, StatusCode::FORBIDDEN, "authority from the URI");
+    assert_eq!(h.authz_at(h2, &admin).await, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn deleted_devices_stay_refused_with_allow_unknown() {
+    let dir = temp_dir("retired");
+    let app = cli_with(&dir, &["--authz-allow-unknown"]).build().await.unwrap();
+    let app: Arc<App> = Arc::new(app);
+    let session = app.open_session(1).await.unwrap();
+    let h = Harness { app, dir, cookie: format!("tegata_session={session}") };
+    let fp = installed(&h, "stolen laptop", &[]).await;
+    let id = h.app.db.read().devices[0].id;
+    h.json("POST", &format!("/api/devices/{id}/revoke"), None).await;
+    let (status, _, _) = h.call("DELETE", &format!("/api/devices/{id}"), None, true).await;
+    assert!(status.is_success(), "{status}");
+    assert_eq!(h.authz(&fp).await, StatusCode::FORBIDDEN, "not let back in as unknown");
+    assert_eq!(h.authz("00aa").await, StatusCode::OK, "a truly unknown cert still passes");
+}
+
+#[derive(Default)]
+struct FailingStore {
+    inner: tegata::store::MemoryStore,
+    failing: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl tegata::store::Store for FailingStore {
+    async fn load(&self) -> anyhow::Result<(tegata::model::State, Option<u64>)> {
+        if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("store unreachable");
+        }
+        self.inner.load().await
+    }
+
+    async fn save(
+        &self,
+        state: &tegata::model::State,
+        version: Option<u64>,
+    ) -> Result<u64, tegata::store::SaveError> {
+        self.inner.save(state, version).await
+    }
+}
+
+#[tokio::test]
+async fn a_replica_that_cannot_reload_stops_answering() {
+    let dir = temp_dir("stale");
+    let store = Arc::new(FailingStore::default());
+    let cli = cli_with(&dir, &["--max-state-age-seconds", "1"]);
+    let app: Arc<App> = Arc::new(cli.build_with_store(Some(store.clone())).await.unwrap());
+    let session = app.open_session(1).await.unwrap();
+    let h = Harness { app, dir, cookie: format!("tegata_session={session}") };
+    let fp = installed(&h, "phone", &[]).await;
+    let health = |router: axum::Router| async move {
+        let req = Request::builder().uri("/healthz").body(Body::empty()).unwrap();
+        router.oneshot(req).await.unwrap().status()
+    };
+    assert_eq!(h.authz(&fp).await, StatusCode::OK);
+
+    store.failing.store(true, std::sync::atomic::Ordering::SeqCst);
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    assert!(h.app.db.refresh().await.is_err());
+    assert_eq!(h.authz(&fp).await, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(health(tegata::router(h.app.clone())).await, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(health(tegata::authz_router(h.app.clone())).await, StatusCode::OK, "liveness");
+
+    store.failing.store(false, std::sync::atomic::Ordering::SeqCst);
+    h.app.db.refresh().await.unwrap();
+    assert_eq!(h.authz(&fp).await, StatusCode::OK);
+    assert_eq!(health(tegata::router(h.app.clone())).await, StatusCode::OK);
 }

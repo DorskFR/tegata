@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,7 +15,7 @@ use crate::identities::Identities;
 use crate::kube::ConfigMapWriter;
 use crate::openbao::{self, OpenBao};
 use crate::store::{FileStore, MemoryStore, OpenBaoStore, Store};
-use crate::util::{now, random_token};
+use crate::util::{now, random_token, write_atomic};
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum Backend {
@@ -45,7 +46,8 @@ pub struct Cli {
     pub data_dir: PathBuf,
     #[arg(long, env = "TEGATA_CA_NAME", default_value = "tegata device CA")]
     pub ca_name: String,
-    /// Needed to register the first passkey. Generated and logged when unset.
+    /// Needed to register the first passkey. When unset, a random one is written to
+    /// `setup-token` in the data dir.
     #[arg(long, env = "TEGATA_SETUP_TOKEN", hide_env_values = true)]
     pub setup_token: Option<String>,
 
@@ -59,6 +61,9 @@ pub struct Cli {
     pub openbao_k8s_role: Option<String>,
     #[arg(long, env = "TEGATA_OPENBAO_CA_CERT")]
     pub openbao_ca_cert: Option<PathBuf>,
+    /// Refuse a plain http:// OpenBao address that is not loopback, instead of warning.
+    #[arg(long, env = "TEGATA_OPENBAO_REQUIRE_TLS", default_value_t = false)]
+    pub openbao_require_tls: bool,
     #[arg(long, env = "TEGATA_OPENBAO_PKI_MOUNT", default_value = "pki")]
     pub openbao_pki_mount: String,
     #[arg(long, env = "TEGATA_OPENBAO_PKI_ROLE", default_value = "device")]
@@ -101,11 +106,69 @@ pub struct Cli {
     pub extra_crl_files: Vec<PathBuf>,
     #[arg(long, env = "TEGATA_CRL_REFRESH_MINUTES", default_value_t = 60)]
     pub crl_refresh_minutes: u64,
+    /// `/authz` answers 503 and readiness fails when the state could not be reloaded for
+    /// this long.
+    #[arg(long, env = "TEGATA_MAX_STATE_AGE_SECONDS", default_value_t = 30)]
+    pub max_state_age_seconds: u64,
+    /// Proxies in front of the gateway that append to `X-Forwarded-For`; the client IP is
+    /// the entry this many places from the end.
+    #[arg(long, env = "TEGATA_TRUSTED_HOPS", default_value_t = 0)]
+    pub trusted_hops: usize,
+}
+
+/// Whether `addr` is http:// to anything but a loopback host.
+fn plaintext_remote(addr: &str) -> anyhow::Result<bool> {
+    let url =
+        Url::parse(addr).with_context(|| format!("TEGATA_OPENBAO_ADDR {addr} is not a URL"))?;
+    if url.scheme() != "http" {
+        return Ok(false);
+    }
+    let loopback = match url.host() {
+        Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    };
+    Ok(!loopback)
 }
 
 impl Cli {
+    /// Writes a generated setup token where only this user can read it, never to the logs.
+    async fn hand_out_setup_token(&self, token: &str) {
+        let path = self.data_dir.join("setup-token");
+        let written = async {
+            tokio::fs::create_dir_all(&self.data_dir).await?;
+            write_atomic(&path, format!("{token}\n").as_bytes(), 0o600).await
+        };
+        match written.await {
+            Ok(()) => {
+                tracing::warn!(path = %path.display(), "no passkey registered yet: open the app and use the setup token in this file")
+            }
+            Err(err) => {
+                tracing::warn!(path = %path.display(), %err, "no passkey registered yet, and the setup token could not be written: set TEGATA_SETUP_TOKEN")
+            }
+        }
+        if std::io::stderr().is_terminal() {
+            eprintln!("setup token: {token}");
+        }
+    }
+
     fn openbao(&self) -> anyhow::Result<Arc<OpenBao>> {
         let addr = self.openbao_addr.as_deref().context("TEGATA_OPENBAO_ADDR is required")?;
+        if plaintext_remote(addr)? {
+            if self.openbao_require_tls {
+                bail!(
+                    "TEGATA_OPENBAO_ADDR {addr} is plain http; use https (TEGATA_OPENBAO_CA_CERT \
+                     for a private CA) or unset TEGATA_OPENBAO_REQUIRE_TLS"
+                );
+            }
+            tracing::warn!(
+                %addr,
+                "OpenBao is reached over plain http: device private keys, the OpenBao token and \
+                 the published CA and CRL cross the network unencrypted and unauthenticated; \
+                 use https, and set TEGATA_OPENBAO_REQUIRE_TLS=true to refuse this"
+            );
+        }
         let auth = match (&self.openbao_token, &self.openbao_k8s_role) {
             (Some(token), _) => openbao::Auth::Token(token.clone()),
             (None, Some(role)) => OpenBao::kubernetes(self.openbao_k8s_mount.clone(), role.clone()),
@@ -168,7 +231,11 @@ impl Cli {
                 })
                 .collect()
         };
-        let setup_token = self.setup_token.clone().unwrap_or_else(random_token);
+        let configured_token = match self.setup_token.as_deref().map(str::trim) {
+            Some("") => bail!("TEGATA_SETUP_TOKEN is set but empty; unset it or give it a value"),
+            other => other.map(str::to_owned),
+        };
+        let setup_token = configured_token.clone().unwrap_or_else(random_token);
         let ca_days = u32::try_from((ca.not_after() - now()).whole_days()).unwrap_or(0);
         if ca_days == 0 {
             bail!("the CA expires within a day; renew it before issuing certificates");
@@ -196,13 +263,54 @@ impl Cli {
             extra_ca_pem: read_all(&self.extra_ca_files)?,
             extra_crl_pem: read_all(&self.extra_crl_files)?,
             setup_token,
+            max_state_age: std::time::Duration::from_secs(self.max_state_age_seconds.max(1)),
+            trusted_hops: self.trusted_hops,
         };
         let identities = Identities::open(self.service_identities.clone())?;
         let auth = Auth::new(&settings.public_url, &settings.rp_name)?;
         let db = Db::open(store).await?;
-        if db.read().passkeys.is_empty() && self.setup_token.is_none() {
-            tracing::warn!(setup_token = %settings.setup_token, "no passkey registered yet: open the app and use this setup token");
+        if db.read().passkeys.is_empty() && configured_token.is_none() {
+            self.hand_out_setup_token(&settings.setup_token).await;
         }
         Ok(App::new(settings, db, ca, auth, trust, identities))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plain_http_is_flagged_unless_loopback() {
+        for addr in ["http://openbao.security.svc.cluster.local:8200", "http://10.0.0.5:8200"] {
+            assert!(plaintext_remote(addr).unwrap(), "{addr}");
+        }
+        for addr in [
+            "https://openbao.security.svc.cluster.local:8200",
+            "http://127.0.0.1:8200",
+            "http://localhost:8200",
+            "http://[::1]:8200",
+        ] {
+            assert!(!plaintext_remote(addr).unwrap(), "{addr}");
+        }
+        assert!(plaintext_remote("not a url").is_err());
+    }
+
+    #[tokio::test]
+    async fn require_tls_refuses_plain_http() {
+        let cli = Cli::parse_from([
+            "tegata",
+            "--public-url",
+            "https://tegata.test",
+            "--backend",
+            "openbao",
+            "--openbao-addr",
+            "http://openbao.example:8200",
+            "--openbao-token",
+            "t",
+            "--openbao-require-tls",
+        ]);
+        let err = cli.build().await.err().expect("refused");
+        assert!(err.to_string().contains("plain http"), "{err}");
     }
 }
