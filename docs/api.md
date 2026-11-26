@@ -13,20 +13,26 @@ Errors: non-2xx with `{ "error": "<message>" }`.
 |---|---|---|---|
 | GET | `/api/session` | | `Session` |
 | POST | `/api/auth/register/start` | `{ "name": string, "setup_token"?: string }` | `{ "publicKey": PublicKeyCredentialCreationOptionsJSON }` |
-| POST | `/api/auth/register/finish` | `RegistrationResponseJSON` (from `credential.toJSON()`) | `204` |
+| POST | `/api/auth/register/finish` | `{ "name": string, "credential": RegistrationResponseJSON }` | `204` |
 | POST | `/api/auth/login/start` | `{}` | `{ "publicKey": PublicKeyCredentialRequestOptionsJSON }` |
 | POST | `/api/auth/login/finish` | `AuthenticationResponseJSON` (from `credential.toJSON()`) | `204`, sets cookie |
 | POST | `/api/auth/logout` | | `204` |
 | GET | `/api/passkeys` | | `Passkey[]` |
-| DELETE | `/api/passkeys/{id}` | | `204` (refused for the last passkey) |
+| DELETE | `/api/passkeys/{id}` | | `204` (refused for the last passkey or a sign-in older than 5 minutes) |
 
 Registration without a session is only allowed while no passkey exists, and needs the
 setup token printed in the server log at startup. A successful first registration also
-logs the browser in.
+logs the browser in. Otherwise adding or removing a passkey needs a sign-in less than 5
+minutes old.
 
-The options objects are WebAuthn JSON: feed them to
-`PublicKeyCredential.parseCreationOptionsFromJSON(publicKey)` /
-`parseRequestOptionsFromJSON(publicKey)`, then send `credential.toJSON()` back.
+The ceremony runs on [kagi](https://github.com/DorskFR/kagi): the options are WebAuthn
+JSON for `createPasskey` / `getPasskey` from `@dorsk/kagi`, whose answers are the
+credentials sent back. The ceremony itself stays on the server, behind an HttpOnly cookie,
+for 5 minutes.
+
+Each client address (an IPv6 /64 counts as one) holds at most 20 open ceremonies, and
+10 failed sign-ins or setup tokens within 15 minutes block that address for the rest of
+the window. Other addresses are never affected.
 
 ```ts
 type Session = { authenticated: boolean; setup_required: boolean; rp_name: string };

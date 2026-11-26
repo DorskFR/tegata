@@ -2,7 +2,7 @@
 	import { Button, Card, Heading, Text } from '@dorsk/tsumikit';
 	import { goto, invalidateAll } from '$app/navigation';
 	import { resolve } from '$app/paths';
-	import { loginWithPasskey, passkeysSupported } from '#lib/webauthn';
+	import { loginWithPasskey, passkeysSupported } from '#lib/passkeys';
 
 	let busy = $state(false);
 	let error = $state('');

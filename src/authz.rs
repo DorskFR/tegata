@@ -51,12 +51,17 @@ fn split_outside_quotes(s: &str, sep: char) -> Vec<&str> {
 /// Envoy appends the peer it saw to `X-Forwarded-For`; anything before it is whatever the
 /// client sent, so the address is counted from the end.
 fn client_ip(headers: &HeaderMap, trusted_hops: usize) -> Option<String> {
-    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
-    header("x-envoy-external-address").map(str::to_owned).or_else(|| {
-        let entries: Vec<&str> = header("x-forwarded-for")?.split(',').map(str::trim).collect();
-        let at = entries.len().checked_sub(1 + trusted_hops)?;
-        Some(entries[at].to_owned()).filter(|ip| !ip.is_empty())
-    })
+    let external = headers.get("x-envoy-external-address").and_then(|v| v.to_str().ok());
+    external.map(str::to_owned).or_else(|| forwarded_ip(headers, trusted_hops))
+}
+
+/// Only the `X-Forwarded-For` hop, which a client cannot choose; Envoy leaves
+/// `x-envoy-external-address` from internal clients as sent.
+pub(crate) fn forwarded_ip(headers: &HeaderMap, trusted_hops: usize) -> Option<String> {
+    let value = headers.get("x-forwarded-for")?.to_str().ok()?;
+    let entries: Vec<&str> = value.split(',').map(str::trim).collect();
+    let at = entries.len().checked_sub(1 + trusted_hops)?;
+    Some(entries[at].to_owned()).filter(|ip| !ip.is_empty())
 }
 
 pub async fn check(State(app): State<AppState>, uri: Uri, headers: HeaderMap) -> Response {
@@ -194,6 +199,17 @@ mod tests {
         );
         assert_eq!(xfcc_cn("Hash=ab"), None);
         assert_eq!(xfcc_cn(r#"Hash=ab;Subject="O=no cn""#), None);
+    }
+
+    #[test]
+    fn the_forwarded_ip_ignores_the_envoy_external_address() {
+        let mut h = HeaderMap::new();
+        h.insert("x-envoy-external-address", HeaderValue::from_static("192.0.2.1"));
+        h.insert("x-forwarded-for", HeaderValue::from_static("192.0.2.1, 203.0.113.7"));
+        assert_eq!(client_ip(&h, 0).as_deref(), Some("192.0.2.1"));
+        assert_eq!(forwarded_ip(&h, 0).as_deref(), Some("203.0.113.7"));
+        h.remove("x-forwarded-for");
+        assert_eq!(forwarded_ip(&h, 0), None);
     }
 
     #[test]

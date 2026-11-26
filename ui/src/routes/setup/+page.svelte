@@ -2,7 +2,7 @@
 	import { Button, Card, Field, Heading, Input, Text } from '@dorsk/tsumikit';
 	import { goto, invalidateAll } from '$app/navigation';
 	import { resolve } from '$app/paths';
-	import { passkeysSupported, registerPasskey } from '#lib/webauthn';
+	import { passkeysSupported, registerPasskey } from '#lib/passkeys';
 
 	let token = $state('');
 	let name = $state('');
