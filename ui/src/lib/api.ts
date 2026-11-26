@@ -12,6 +12,8 @@ export type Cert = {
 	enrolled_at: string | null;
 	revoked_at: string | null;
 	enrollment_expires_at: string | null;
+	/** Revoked in tegata but not yet confirmed by the CA, so not on the CRL. */
+	revocation_pending: boolean;
 };
 export type LastSeen = { at: string; ip: string | null; user_agent: string | null };
 export type Device = {
@@ -27,7 +29,7 @@ export type Device = {
 	last_seen: LastSeen | null;
 	stale: boolean;
 };
-export type Enrollment = { url: string; password: string; expires_at: string };
+export type Enrollment = { serial: string; url: string; password: string; expires_at: string };
 export type Created = { device: Device; enrollment: Enrollment };
 export type Config = {
 	validity_days: { default: number; max: number; presets: number[] };

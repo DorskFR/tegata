@@ -236,6 +236,8 @@ pub struct CertView {
     pub revoked_at: Option<OffsetDateTime>,
     #[serde(with = "time::serde::rfc3339::option")]
     pub enrollment_expires_at: Option<OffsetDateTime>,
+    /// Revoked here, but the CA has not confirmed it, so it is not on the CRL yet.
+    pub revocation_pending: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -271,6 +273,7 @@ impl CertView {
             } else {
                 None
             },
+            revocation_pending: cert.awaits_ca_revoke(now),
         }
     }
 }

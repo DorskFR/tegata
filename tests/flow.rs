@@ -847,6 +847,7 @@ async fn failed_ca_revocations_keep_the_bundle_and_are_retried() {
 
     let (_, created) = h.json("POST", "/api/devices", Some(json!({"name": "phone"}))).await;
     let id = created["device"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(created["enrollment"]["serial"], created["device"]["cert"]["serial"]);
     let (status, _, _) =
         h.call("GET", &format!("/enroll/{}/device.p12", token_of(&created)), None, false).await;
     assert_eq!(status, StatusCode::OK);
@@ -867,12 +868,21 @@ async fn failed_ca_revocations_keep_the_bundle_and_are_retried() {
     h.app.sweep().await.unwrap();
     let published = crl().await;
     assert!(serials.iter().all(|s| !published.contains(s)), "still failing");
+    let (_, devices) = h.json("GET", "/api/devices", None).await;
+    assert_eq!(devices[0]["status"], "revoked");
+    assert_eq!(devices[0]["cert"]["revocation_pending"], true, "the UI is told");
+    let (status, _, _) = h.call("DELETE", &format!("/api/devices/{id}"), None, true).await;
+    assert_eq!(status, StatusCode::CONFLICT, "no delete before the CA confirms");
 
     ca.failing.store(false, std::sync::atomic::Ordering::SeqCst);
     h.app.sweep().await.unwrap();
     let published = crl().await;
     assert!(serials.iter().all(|s| published.contains(s)), "the sweep retried both");
     assert!(h.app.db.read().devices[0].certs.iter().all(|c| c.ca_revoked_at.is_some()));
+    let (_, devices) = h.json("GET", "/api/devices", None).await;
+    assert_eq!(devices[0]["cert"]["revocation_pending"], false);
+    let (status, _, _) = h.call("DELETE", &format!("/api/devices/{id}"), None, true).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
 }
 
 fn passkey(name: &str) -> tegata::model::PasskeyRecord {
