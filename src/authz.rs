@@ -1,3 +1,5 @@
+use std::fmt::Write;
+
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -97,7 +99,7 @@ fn header_safe(name: &str) -> String {
         if (0x20..0x7f).contains(&byte) && byte != b'%' {
             out.push(char::from(byte));
         } else {
-            out.push_str(&format!("%{byte:02X}"));
+            let _ = write!(out, "%{byte:02X}");
         }
     }
     out

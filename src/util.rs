@@ -43,32 +43,6 @@ pub fn normalize_serial(serial: &str) -> String {
     hex::decode(&padded).map(|b| format_serial(&b)).unwrap_or(padded)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn password_shape() {
-        let p = password();
-        assert_eq!(p.len(), 19);
-        assert_eq!(p.split('-').count(), 4);
-        assert!(p.chars().all(|c| c == '-' || c.is_ascii_lowercase()));
-    }
-
-    #[test]
-    fn serials_normalize() {
-        assert_eq!(normalize_serial("0A:0b:FF"), "0a:0b:ff");
-        assert_eq!(normalize_serial("00:0a:0b"), "0a:0b");
-        assert_eq!(normalize_serial("a0b"), "0a:0b");
-    }
-
-    #[test]
-    fn tokens_are_unique() {
-        assert_ne!(random_token(), random_token());
-        assert_eq!(random_token().len(), 43);
-    }
-}
-
 /// At most `max` events per `window`, counted in fixed windows.
 pub struct RateLimit {
     max: u32,
@@ -108,4 +82,30 @@ pub async fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> std::io::Resu
     file.sync_all().await?;
     drop(file);
     tokio::fs::rename(&tmp, path).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn password_shape() {
+        let p = password();
+        assert_eq!(p.len(), 19);
+        assert_eq!(p.split('-').count(), 4);
+        assert!(p.chars().all(|c| c == '-' || c.is_ascii_lowercase()));
+    }
+
+    #[test]
+    fn serials_normalize() {
+        assert_eq!(normalize_serial("0A:0b:FF"), "0a:0b:ff");
+        assert_eq!(normalize_serial("00:0a:0b"), "0a:0b");
+        assert_eq!(normalize_serial("a0b"), "0a:0b");
+    }
+
+    #[test]
+    fn tokens_are_unique() {
+        assert_ne!(random_token(), random_token());
+        assert_eq!(random_token().len(), 43);
+    }
 }

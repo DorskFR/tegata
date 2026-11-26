@@ -153,7 +153,7 @@ impl App {
         }
     }
 
-    pub async fn devices(&self) -> Vec<DeviceView> {
+    pub fn devices(&self) -> Vec<DeviceView> {
         let mut devices: Vec<_> = self.db.read().devices.iter().map(|d| self.view(d)).collect();
         devices.sort_by_key(|d| d.name.to_lowercase());
         devices
@@ -265,20 +265,20 @@ impl App {
         }
     }
 
-    async fn find(&self, id: Uuid) -> ApiResult<Device> {
+    fn find(&self, id: Uuid) -> ApiResult<Device> {
         self.db.read().devices.iter().find(|d| d.id == id).cloned().ok_or(ApiError::NotFound)
     }
 
     /// Issues a replacement; the current cert stays valid until the new one is downloaded.
     pub async fn rotate(&self, id: Uuid, validity_days: Option<u32>) -> ApiResult<Created> {
         let validity = self.validity(validity_days)?;
-        let device = self.find(id).await?;
+        let device = self.find(id)?;
         self.replace_pending(&device, validity).await
     }
 
     /// A fresh link for a device whose install has not happened yet.
     pub async fn new_enrollment(&self, id: Uuid) -> ApiResult<Created> {
-        let device = self.find(id).await?;
+        let device = self.find(id)?;
         let pending = device
             .pending_cert(now())
             .ok_or_else(|| ApiError::Conflict("nothing is waiting to be installed".into()))?;

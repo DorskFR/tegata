@@ -126,7 +126,7 @@ pub async fn delete_passkey(
 }
 
 pub async fn devices(State(app): State<AppState>, _: Admin) -> impl IntoResponse {
-    Json(app.devices().await)
+    Json(app.devices())
 }
 
 #[derive(Deserialize)]
@@ -264,11 +264,11 @@ pub async fn patch_device(
 }
 
 pub async fn groups(State(app): State<AppState>, _: Admin) -> impl IntoResponse {
-    Json(app.groups().await)
+    Json(app.groups())
 }
 
 pub async fn apps(State(app): State<AppState>, _: Admin) -> impl IntoResponse {
-    Json(app.apps().await)
+    Json(app.apps())
 }
 
 #[derive(Deserialize)]
