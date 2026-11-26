@@ -152,7 +152,8 @@
 
 	<Callout tone="info" icon="lock" title="How restrictions work">
 		A device passes a restricted app when it shares at least one group with it. Certificates not
-		issued by tegata never pass restricted apps.
+		issued by tegata never pass restricted apps, unless a service identity explicitly lists the
+		host.
 	</Callout>
 
 	{#if thisDevice && thisDevice.name === null}

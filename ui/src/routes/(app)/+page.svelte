@@ -19,6 +19,7 @@
 	import GroupsDialog from '#lib/components/GroupsDialog.svelte';
 	import LockoutConfirm from '#lib/components/LockoutConfirm.svelte';
 	import StatusBadge from '#lib/components/StatusBadge.svelte';
+	import { revocationPending } from '#lib/devices';
 	import { formatDate, relativeTime, shortFingerprint } from '#lib/format';
 
 	let devices = $state<Device[] | null>(null);
@@ -140,8 +141,15 @@
 		confirmBusy = true;
 		try {
 			if (kind === 'revoke') {
-				await api.devices.revoke(device.id);
-				toasts.ok(`Revoked ${device.name}`);
+				const revoked = await api.devices.revoke(device.id);
+				if (revocationPending(revoked)) {
+					toasts.info(
+						`Revoked ${device.name} in tegata, but the CA has not confirmed it yet, so it is not on the CRL. tegata retries every minute.`,
+						10000
+					);
+				} else {
+					toasts.ok(`Revoked ${device.name}`);
+				}
 			} else {
 				await api.devices.remove(device.id);
 				toasts.ok(`Deleted ${device.name}`);
@@ -158,7 +166,11 @@
 
 	function canDelete(d: Device): boolean {
 		return (
-			d.status !== 'active' && d.status !== 'expiring' && d.status !== 'pending' && !d.rotation
+			d.status !== 'active' &&
+			d.status !== 'expiring' &&
+			d.status !== 'pending' &&
+			!d.rotation &&
+			!revocationPending(d)
 		);
 	}
 	function canRevoke(d: Device): boolean {
@@ -234,6 +246,15 @@
 						<StatusBadge status={d.status} />
 						{#if d.rotation}
 							<Text size="xs" tone="muted">rotation waiting</Text>
+						{/if}
+						{#if revocationPending(d)}
+							<Badge
+								tone="warn"
+								size="sm"
+								title="The CA has not confirmed the revocation, so the certificate is not on the CRL yet. tegata retries every minute."
+							>
+								CA confirmation pending
+							</Badge>
 						{/if}
 					</div>
 					<div class="cell expiry">

@@ -72,6 +72,8 @@ pub type AppState = Arc<App>;
 
 #[derive(Serialize)]
 pub struct Enrollment {
+    /// The certificate this link installs.
+    pub serial: String,
     pub url: String,
     pub password: String,
     #[serde(with = "time::serde::rfc3339")]
@@ -212,7 +214,8 @@ impl App {
             .public_url
             .join(&format!("enroll/{token}"))
             .map_err(|e| ApiError::Internal(e.into()))?;
-        Ok((record, link, Enrollment { url: url.to_string(), password, expires_at }))
+        let serial = record.serial.clone();
+        Ok((record, link, Enrollment { serial, url: url.to_string(), password, expires_at }))
     }
 
     pub async fn create_device(
@@ -334,7 +337,7 @@ impl App {
             .await?;
         tracing::info!(device = %view.name, ?serials, "device revoked");
         self.revoke_serials(&serials).await;
-        Ok(view)
+        Ok(self.find(id).map_or(view, |d| self.view(&d)))
     }
 
     pub async fn delete_device(&self, id: Uuid) -> ApiResult<()> {
@@ -344,6 +347,13 @@ impl App {
                 let t = now();
                 if d.has_live_cert(t) {
                     return Err(ApiError::Conflict("revoke the device before deleting it".into()));
+                }
+                if d.certs.iter().any(|c| c.awaits_ca_revoke(t)) {
+                    return Err(ApiError::Conflict(
+                        "the CA has not confirmed the revocation yet, so the certificate is not \
+                         on the CRL; tegata retries every minute, delete the device after that"
+                            .into(),
+                    ));
                 }
                 let retired: Vec<RetiredCert> = d
                     .certs

@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { Button, Callout, CopyButton, Heading, Text } from '@dorsk/tsumikit';
 	import type { Device, Enrollment } from '#lib/api';
-	import { formatCountdown, isPast } from '#lib/format';
+	import { linkState } from '#lib/devices';
+	import { formatCountdown } from '#lib/format';
 	import Qr from './Qr.svelte';
 	import StatusBadge from './StatusBadge.svelte';
 
@@ -17,9 +18,8 @@
 		return () => clearInterval(id);
 	});
 
-	const expired = $derived(isPast(enrollment.expires_at, now));
+	const link = $derived(linkState(device, enrollment, now));
 	const countdown = $derived(formatCountdown(enrollment.expires_at, now));
-	const installed = $derived(device.status !== 'pending' && device.rotation === null);
 </script>
 
 <section class="panel" aria-labelledby="enroll-title">
@@ -44,15 +44,19 @@
 		</div>
 	{/snippet}
 
-	{#if installed}
+	{#if link === 'installed'}
 		<Callout tone="ok" title="Downloaded">
 			The device has the file. Enter this password on it to finish installing, then close this
 			panel: the password is not shown again.
 		</Callout>
 		{@render password()}
-	{:else if expired}
+	{:else if link === 'expired'}
 		<Callout tone="warn" title="Link expired">
 			Nobody downloaded the certificate in time. Use "New link" on the device to issue another one.
+		</Callout>
+	{:else if link === 'revoked'}
+		<Callout tone="warn" title="Link revoked">
+			The certificate behind this link was revoked before anyone downloaded it.
 		</Callout>
 	{:else}
 		<div class="body">
