@@ -4,6 +4,7 @@ pub mod auth;
 pub mod authz;
 pub mod bundle;
 pub mod ca;
+pub mod ceremonies;
 pub mod config;
 pub mod db;
 pub mod enroll;

@@ -24,6 +24,6 @@ export function loginWithPasskey(): Promise<void> {
 export function registerPasskey(name: string, setupToken?: string): Promise<void> {
 	return ceremony(async () => {
 		const credential = await createPasskey(await api.auth.registerStart(name, setupToken));
-		await api.auth.registerFinish(name, credential);
+		await api.auth.registerFinish(credential);
 	}, 'Adding the passkey failed.');
 }

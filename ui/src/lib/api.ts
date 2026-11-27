@@ -113,8 +113,8 @@ export const api = {
 				name,
 				...(setup_token ? { setup_token } : {})
 			}),
-		registerFinish: (name: string, credential: RegistrationResponseJSON) =>
-			request<void>('POST', '/api/auth/register/finish', { name, credential }),
+		registerFinish: (credential: RegistrationResponseJSON) =>
+			request<void>('POST', '/api/auth/register/finish', { credential }),
 		loginStart: () => request<RequestOptionsJSON>('POST', '/api/auth/login/start', {}),
 		loginFinish: (credential: AuthenticationResponseJSON) =>
 			request<void>('POST', '/api/auth/login/finish', credential),

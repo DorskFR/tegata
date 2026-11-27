@@ -18,6 +18,8 @@ pub struct State {
     /// Certs of deleted devices, kept until they expire so they stay refused.
     #[serde(default)]
     pub retired: Vec<RetiredCert>,
+    #[serde(default)]
+    pub ceremonies: Vec<crate::ceremonies::CeremonyRecord>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

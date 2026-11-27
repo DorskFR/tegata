@@ -65,7 +65,6 @@ pub async fn register_start(
 
 #[derive(Deserialize)]
 pub struct RegisterFinish {
-    name: String,
     credential: RegisterPublicKeyCredential,
 }
 
@@ -75,7 +74,7 @@ pub async fn register_finish(
     jar: CookieJar,
     Json(body): Json<RegisterFinish>,
 ) -> ApiResult<impl IntoResponse> {
-    let jar = app.finish_registration(jar, address, &body.name, &body.credential).await?;
+    let jar = app.finish_registration(jar, address, &body.credential).await?;
     Ok((jar, StatusCode::NO_CONTENT))
 }
 

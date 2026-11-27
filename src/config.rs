@@ -267,8 +267,8 @@ impl Cli {
             trusted_hops: self.trusted_hops,
         };
         let identities = Identities::open(self.service_identities.clone())?;
-        let auth = Auth::new(&settings.public_url, &settings.rp_name)?;
-        let db = Db::open(store).await?;
+        let db = Arc::new(Db::open(store).await?);
+        let auth = Auth::new(&settings.public_url, &settings.rp_name, db.clone())?;
         if db.read().passkeys.is_empty() && configured_token.is_none() {
             self.hand_out_setup_token(&settings.setup_token).await;
         }
