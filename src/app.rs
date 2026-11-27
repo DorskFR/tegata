@@ -53,7 +53,7 @@ impl Settings {
 
 pub struct App {
     pub settings: Settings,
-    pub db: Db,
+    pub db: Arc<Db>,
     pub ca: Arc<dyn Ca>,
     pub auth: Auth,
     pub trust: Option<ConfigMapWriter>,
@@ -120,7 +120,7 @@ fn clean_label(raw: &str, what: &str, required: bool) -> ApiResult<String> {
 impl App {
     pub fn new(
         settings: Settings,
-        db: Db,
+        db: Arc<Db>,
         ca: Arc<dyn Ca>,
         auth: Auth,
         trust: Option<ConfigMapWriter>,

@@ -1,5 +1,6 @@
 use std::future::{Future, ready};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use axum::extract::{ConnectInfo, FromRequestParts};
@@ -7,15 +8,17 @@ use axum::http::request::Parts;
 use axum_extra::extract::CookieJar;
 use axum_extra::extract::cookie::{Cookie, SameSite};
 use kagi::{
-    Account, CreationChallengeResponse, CredentialStore, Kagi, MemoryCeremonies, Passkey,
-    PasskeyRole, Proof, PublicKeyCredential, RegisterPublicKeyCredential, Removal,
-    RequestChallengeResponse, Settings, Stored, StoredPasskey,
+    Account, CreationChallengeResponse, CredentialStore, Kagi, Passkey, PasskeyRole, Proof,
+    PublicKeyCredential, RegisterPublicKeyCredential, Removal, RequestChallengeResponse, Settings,
+    Stored, StoredPasskey,
 };
 use time::Duration;
 use url::Url;
 use uuid::Uuid;
 
 use crate::app::{App, AppState};
+use crate::ceremonies::{LIMITS, SharedCeremonies};
+use crate::db::Db;
 use crate::error::{ApiError, ApiResult};
 use crate::model::{PasskeyRecord, SessionRecord};
 use crate::util::{Failures, now, random_token, sha256_hex};
@@ -30,18 +33,18 @@ const ADMIN: &str = "admin";
 const SETUP: &str = "setup";
 
 pub struct Auth {
-    kagi: Kagi<()>,
+    kagi: Kagi<(), SharedCeremonies>,
     user_id: Uuid,
     pub(crate) failures: Failures,
 }
 
 impl Auth {
-    pub fn new(public_url: &Url, rp_name: &str) -> anyhow::Result<Self> {
+    pub fn new(public_url: &Url, rp_name: &str, db: Arc<Db>) -> anyhow::Result<Self> {
         let decoy_key: [u8; 32] = rand::random();
         let settings =
             Settings { step_up: STEP_UP, ..Settings::new(public_url, rp_name, &decoy_key) };
         Ok(Self {
-            kagi: Kagi::new(settings, MemoryCeremonies::default())?,
+            kagi: Kagi::new(settings, SharedCeremonies::new(db, LIMITS))?,
             user_id: Uuid::new_v5(&Uuid::NAMESPACE_URL, public_url.as_str().as_bytes()),
             failures: Failures::default(),
         })
@@ -199,7 +202,9 @@ fn refused(err: kagi::Error) -> ApiError {
         Error::Ceremony | Error::Purpose | Error::Binding => {
             ApiError::bad_request("passkey ceremony expired, try again")
         }
-        Error::Rejected { .. } => ApiError::Forbidden("passkey was not accepted".into()),
+        Error::Rejected { .. } | Error::Cloned { .. } => {
+            ApiError::Forbidden("passkey was not accepted".into())
+        }
         Error::StepUp => step_up_refused(),
         Error::Duplicate => ApiError::Conflict("this passkey is already registered".into()),
         Error::LastCredential => ApiError::Conflict("the last passkey cannot be removed".into()),
@@ -234,10 +239,15 @@ impl App {
     }
 
     fn count_failure(&self, address: Option<IpAddr>, err: &kagi::Error) {
-        if matches!(err, kagi::Error::Rejected { .. }) {
-            tracing::warn!(?address, "passkey ceremony rejected");
-            self.auth.failures.record(address);
+        match err {
+            kagi::Error::Rejected { .. } => tracing::warn!(?address, "passkey ceremony rejected"),
+            kagi::Error::Cloned { .. } => tracing::warn!(
+                ?address,
+                "passkey signature counter went backwards, the key may have been cloned"
+            ),
+            _ => return,
         }
+        self.auth.failures.record(address);
     }
 
     async fn signed_in(&self, jar: &CookieJar) -> ApiResult<SessionRecord> {
@@ -339,12 +349,12 @@ impl App {
             let session = self.signed_in(&jar).await?;
             (Self::sign_in_proof(&session), session.token_hash)
         };
-        passkey_name(name)?;
+        let name = passkey_name(name)?;
         let account = Account { user: (), name: ADMIN, display_name: &self.settings.rp_name };
         let challenge = self
             .auth
             .kagi
-            .start_registration(&self.passkeys(None), account, proof, &binding, address)
+            .start_registration_with(&self.passkeys(None), account, proof, &binding, address, name)
             .await
             .map_err(refused)?;
         Ok((self.challenge_cookie(jar, challenge.ceremony), challenge.options))
@@ -354,24 +364,24 @@ impl App {
         &self,
         jar: CookieJar,
         address: Option<IpAddr>,
-        name: &str,
         credential: &RegisterPublicKeyCredential,
     ) -> ApiResult<CookieJar> {
         let ceremony = challenge_id(&jar)?;
-        let name = passkey_name(name)?;
         let jar = jar.remove(Cookie::build(CHALLENGE_COOKIE).path("/"));
         if self.db.read().passkeys.is_empty() {
-            return self.finish_setup(jar, address, &ceremony, name, credential).await;
+            return self.finish_setup(jar, address, &ceremony, credential).await;
         }
         let session = self.signed_in(&jar).await?;
         Self::require_step_up(&session)?;
         let store = self.passkeys(session.passkey_id);
-        self.auth
+        let registered = self
+            .auth
             .kagi
-            .finish_registration(&store, &ceremony, &session.token_hash, credential, name)
+            .finish_carried_registration(&store, &ceremony, &session.token_hash, credential)
             .await
             .inspect_err(|err| self.count_failure(address, err))
             .map_err(refused)?;
+        let name = registered.data.unwrap_or_default();
         tracing::warn!(%name, added_by = ?session.passkey_id, "passkey added");
         Ok(jar)
     }
@@ -381,7 +391,6 @@ impl App {
         jar: CookieJar,
         address: Option<IpAddr>,
         ceremony: &str,
-        name: &str,
         credential: &RegisterPublicKeyCredential,
     ) -> ApiResult<CookieJar> {
         let enrolment = self
@@ -391,10 +400,13 @@ impl App {
             .await
             .inspect_err(|err| self.count_failure(address, err))
             .map_err(refused)?;
+        let name = enrolment
+            .data
+            .ok_or_else(|| ApiError::bad_request("passkey ceremony expired, try again"))?;
         let id = Uuid::new_v4();
         let record = PasskeyRecord {
             id,
-            name: name.to_owned(),
+            name: name.clone(),
             created_at: now(),
             last_used_at: None,
             added_by: None,

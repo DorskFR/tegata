@@ -1,6 +1,6 @@
 [package]
 name = "tegata"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2024"
 rust-version = "1.94"
 license = "WTFPL"
@@ -30,7 +30,7 @@ axum-extra = { version = "0.12", features = ["cookie"] }
 base64 = "0.23"
 clap = { version = "4", features = ["derive", "env"] }
 hex = "0.4"
-kagi = { git = "https://github.com/DorskFR/kagi", tag = "v0.1.0" }
+kagi = { git = "https://github.com/DorskFR/kagi", tag = "v0.2.1", features = ["serde"] }
 mime_guess = "2"
 p12-keystore = "0.4"
 pem = "3"

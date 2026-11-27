@@ -1561,8 +1561,8 @@ dependencies = [
 
 [[package]]
 name = "kagi"
-version = "0.1.0"
-source = "git+https://github.com/DorskFR/kagi?tag=v0.1.0#58eb46be0e203ea2f8d8238ceb23e0e2ee564439"
+version = "0.2.1"
+source = "git+https://github.com/DorskFR/kagi?tag=v0.2.1#ba5dd4f2ca6be7e8dcd8aac3bfe83305c437a2ec"
 dependencies = [
  "base64 0.23.1",
  "getrandom 0.4.3",
@@ -2805,7 +2805,7 @@ dependencies = [
 
 [[package]]
 name = "tegata"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "async-trait",

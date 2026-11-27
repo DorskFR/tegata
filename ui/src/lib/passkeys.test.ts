@@ -41,14 +41,14 @@ describe('passkeys over kagi', () => {
 		expect(calls[1]?.body).toEqual({ id: 'cred' });
 	});
 
-	it('sends the name with the new passkey', async () => {
+	it('names the passkey at the start only', async () => {
 		const calls = recordFetch();
 		kagi.createPasskey.mockResolvedValue({ id: 'new' });
 		await registerPasskey('laptop', 'token');
 		expect(calls[0]?.body).toEqual({ name: 'laptop', setup_token: 'token' });
 		expect(calls[1]).toEqual({
 			url: '/api/auth/register/finish',
-			body: { name: 'laptop', credential: { id: 'new' } }
+			body: { credential: { id: 'new' } }
 		});
 	});
 

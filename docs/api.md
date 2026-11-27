@@ -13,7 +13,7 @@ Errors: non-2xx with `{ "error": "<message>" }`.
 |---|---|---|---|
 | GET | `/api/session` | | `Session` |
 | POST | `/api/auth/register/start` | `{ "name": string, "setup_token"?: string }` | `{ "publicKey": PublicKeyCredentialCreationOptionsJSON }` |
-| POST | `/api/auth/register/finish` | `{ "name": string, "credential": RegistrationResponseJSON }` | `204` |
+| POST | `/api/auth/register/finish` | `{ "credential": RegistrationResponseJSON }` (the name given at the start is kept) | `204` |
 | POST | `/api/auth/login/start` | `{}` | `{ "publicKey": PublicKeyCredentialRequestOptionsJSON }` |
 | POST | `/api/auth/login/finish` | `AuthenticationResponseJSON` (from `credential.toJSON()`) | `204`, sets cookie |
 | POST | `/api/auth/logout` | | `204` |
@@ -27,10 +27,11 @@ minutes old.
 
 The ceremony runs on [kagi](https://github.com/DorskFR/kagi): the options are WebAuthn
 JSON for `createPasskey` / `getPasskey` from `@dorsk/kagi`, whose answers are the
-credentials sent back. The ceremony itself stays on the server, behind an HttpOnly cookie,
-for 5 minutes.
+credentials sent back. The ceremony itself stays on the server, in the shared state behind
+an HttpOnly cookie, for 5 minutes, so any replica can finish it.
 
-Each client address (an IPv6 /64 counts as one) holds at most 20 open ceremonies, and
+Each client address (an IPv6 /64 counts as one) holds at most 20 open ceremonies, 256 in
+all, and
 10 failed sign-ins or setup tokens within 15 minutes block that address for the rest of
 the window. Other addresses are never affected.
 
